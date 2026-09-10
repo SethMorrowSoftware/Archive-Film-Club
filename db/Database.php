@@ -98,6 +98,13 @@ class Database {
      * DEALLOCATE PREPARE, which the migration files use for dynamic DDL.
      * Migration runners must therefore go through exec(). Never pass
      * user-supplied strings here: there is no parameter binding.
+     *
+     * CAUTION: PDO::exec() does not read result sets. A statement that returns
+     * rows (SELECT, SHOW, an EXECUTE of a prepared SELECT...) leaves them
+     * pending on the connection and the NEXT statement fails with MySQL
+     * error 2014 ("Cannot execute queries while other unbuffered queries are
+     * active"). Migrations must only run statements that return no rows —
+     * use `DO 0` as a no-op, never `SELECT 1`.
      */
     public function exec(string $sql): int {
         $this->queryCount++;

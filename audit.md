@@ -591,6 +591,19 @@ A3 at 1440×900, 390×844 and 740×360. All pass.
 - No live MySQL/Apache was available in this environment: SQL and `.htaccess` changes were reviewed for MySQL 5.7/8 + MariaDB 10.2 and Apache 2.4 syntax but not executed against a server. Recommended manual check after deploy: run the installer on an empty database (exercises the new migration 007), then *System → Maintenance → Run migrations* once more (idempotency).
 - `node-fetch` remains an unused Electron dependency.
 
+### Post-merge fix (same day): migration 007 failed on a live MySQL **[verified on the maintainer's host]**
+The no-op branch of each dynamic block was `SELECT 1`. `PDO::exec()` never
+reads a result set, so on a fresh database (where 006 had already created the
+named FK and the no-op ran) the rows stayed pending and the next statement
+died with MySQL error 2014 *"Cannot execute queries while other unbuffered
+queries are active"* — the installer stopped at step 2 again. The no-op is now
+`DO 0` (returns nothing), `Database::exec()` documents the constraint, and the
+smoke test rejects any migration statement — or any dynamic-SQL literal in a
+`SET @sql` — that would return rows. Re-running the installer's step 2 (or
+Admin → System → Run migrations) on the affected database is safe: the
+migration is idempotent and the failed run changed nothing but the nullable
+column.
+
 ## F. Verification
 `bash scripts/check-syntax.sh all` (86 PHP, 38 JS files), `php tests/smoke.php`
 (incl. the new migration-splitter and colour-guard cases), the new
