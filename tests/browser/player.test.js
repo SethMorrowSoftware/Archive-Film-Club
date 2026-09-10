@@ -54,6 +54,7 @@ async function mockNetwork(page, fixture) {
   await page.route('**/fonts.googleapis.com/**', r => r.abort());
   await page.route('**/fonts.gstatic.com/**', r => r.abort());
   await page.route('**/api/**', r => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: false, error: 'offline (test)' }) }));
+  await page.route('**/archive.org/**', r => r.fulfill({ status: 404, body: '' }));
   await page.route('**/api/metadata.php*', r => {
     const id = new URL(r.request().url()).searchParams.get('id');
     r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(id === 'single' ? SINGLE : fixture) });
@@ -119,6 +120,14 @@ async function dumpState(page, label) {
 }
 
 const check = (label, ok, detail) => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? '  — ' + detail : ''}`); };
+// Context options for every page: never let the site's service worker
+// register. Playwright does not intercept the worker's own script fetch or
+// fetches the worker makes, so once it installed (after the first load, on a
+// slow runner) it answered api/metadata.php from the real PHP endpoint and
+// the mocks silently stopped applying. Also disable Chromium's speculative
+// network predictor so a reload never differs from a fresh navigation.
+const PAGE_OPTS = { serviceWorkers: 'block' };
+
 const rect = (page, sel) => page.evaluate(s => { const el = document.querySelector(s); if (!el) return null; const r = el.getBoundingClientRect(); return { top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), width: Math.round(r.width), height: Math.round(r.height) }; }, sel);
 const scrollTo = (page, y) => page.evaluate(v => window.scrollTo({ top: v, behavior: 'instant' }), y).then(() => page.waitForTimeout(150));
 
@@ -126,7 +135,12 @@ async function open(page, url) {
   await page.goto(url);
   await page.evaluate(() => { try { localStorage.setItem('afc_disclaimer_ack_v1', '1'); } catch (e) {} });
   await page.reload();
-  await page.waitForSelector('video', { timeout: 15000 });
+  try {
+    await page.waitForSelector('video', { timeout: 30000 });
+  } catch (e) {
+    await dumpState(page, `open ${url}: <video> never rendered`);
+    throw e;
+  }
 }
 async function waitForPlaylist(page, label) {
   try {
@@ -158,7 +172,7 @@ async function startPhp() {
 
 // ---------- suites ----------
 async function desktop(browser, base) {
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const page = await browser.newPage({ ...PAGE_OPTS, viewport: { width: 1440, height: 900 } });
   const errors = []; page.on('pageerror', e => errors.push(e.message)); instrument(page);
   await mockNetwork(page, seriesFixture(60, false));
   await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} }).catch(() => {});
@@ -222,7 +236,7 @@ async function desktop(browser, base) {
 }
 
 async function behaviours(browser, base) {
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const page = await browser.newPage({ ...PAGE_OPTS, viewport: { width: 1440, height: 900 } });
   const errors = []; page.on('pageerror', e => errors.push(e.message)); instrument(page);
   await mockNetwork(page, seriesFixture(6, true));
   await openSeries(page, `${base}/player.php?video=show`);
@@ -263,7 +277,7 @@ async function behaviours(browser, base) {
 }
 
 async function phone(browser, base) {
-  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  const page = await browser.newPage({ ...PAGE_OPTS, viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const errors = []; page.on('pageerror', e => errors.push(e.message)); instrument(page);
   await mockNetwork(page, seriesFixture(60, false));
   await openSeries(page, `${base}/player.php?video=show`);
@@ -280,7 +294,7 @@ async function phone(browser, base) {
   check('phone: no page errors', errors.length === 0, errors.join(' | '));
   await page.close();
 
-  const land = await browser.newPage({ viewport: { width: 740, height: 360 }, isMobile: true, hasTouch: true });
+  const land = await browser.newPage({ ...PAGE_OPTS, viewport: { width: 740, height: 360 }, isMobile: true, hasTouch: true });
   instrument(land);
   await mockNetwork(land, seriesFixture(10, false));
   await openSeries(land, `${base}/player.php?video=show`);
@@ -292,7 +306,7 @@ async function phone(browser, base) {
 (async () => {
   const server = process.env.BASE_URL ? null : await startPhp();
   const base = process.env.BASE_URL || server.base;
-  const launch = { args: ['--autoplay-policy=no-user-gesture-required'] };
+  const launch = { args: ['--autoplay-policy=no-user-gesture-required', '--disable-features=NetworkPrediction'] };
   if (process.env.CHROMIUM_PATH) launch.executablePath = process.env.CHROMIUM_PATH;
   const browser = await playwright.chromium.launch(launch);
   try {
