@@ -75,6 +75,49 @@ async function mockNetwork(page, fixture) {
 
 // ---------- helpers ----------
 let failures = 0;
+
+/**
+ * Attach console / error capture to a page. On a hard failure (a timeout
+ * waiting for the player to render) we print this buffer plus a snapshot
+ * of the player's DOM state, so a CI log explains *why* instead of just
+ * "waiting for locator('.playlist-item')".
+ */
+function instrument(page) {
+  const log = [];
+  page.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') log.push(`[console.${m.type()}] ${m.text().slice(0, 300)}`); });
+  page.on('pageerror', e => log.push(`[pageerror] ${e.message}`));
+  page.on('requestfailed', r => { const u = r.url(); if (!/fonts\.g/.test(u)) log.push(`[requestfailed] ${u} ${r.failure() && r.failure().errorText}`); });
+  // Request/response trace (same-origin only): a request with no matching
+  // response line in the dump is one the dev server never answered.
+  const short = u => u.replace(/^https?:\/\/[^/]+/, '');
+  page.on('request', r => { if (!/^https?:\/\/127\.0\.0\.1/.test(r.url())) return; log.push(`[req] ${short(r.url())}`); });
+  page.on('response', r => { if (!/^https?:\/\/127\.0\.0\.1/.test(r.url())) return; log.push(`[res ${r.status()}] ${short(r.url())}`); });
+  page.__afcLog = log;
+  return log;
+}
+
+async function dumpState(page, label) {
+  console.log(`\n---- diagnostics: ${label} ----`);
+  for (const line of (page.__afcLog || []).slice(-120)) console.log('  ' + line);
+  try {
+    const snap = await page.evaluate(() => {
+      const q = s => document.querySelector(s);
+      const disp = s => { const el = q(s); return el ? getComputedStyle(el).display : 'MISSING'; };
+      return {
+        url: location.href, ready: document.readyState, afcReady: !!window.__afcReady,
+        bodyClass: document.body.className, title: document.title,
+        video: !!q('video'), videoSrc: q('video source') ? q('video source').src : null,
+        videoReady: q('video') ? q('video').readyState : null, videoError: q('video') && q('video').error ? q('video').error.code : null,
+        iframe: !!q('iframe.video-player'), loader: disp('#playerLoader'), sidebar: disp('#playlistSidebar'),
+        items: document.querySelectorAll('.playlist-item').length, titleText: q('#videoTitle') ? q('#videoTitle').textContent : null,
+        errorBox: q('.player-error') ? q('.player-error').textContent.trim().slice(0, 200) : null,
+      };
+    });
+    console.log('  ' + JSON.stringify(snap));
+  } catch (e) { console.log('  (could not snapshot page: ' + e.message + ')'); }
+  console.log('----');
+}
+
 const check = (label, ok, detail) => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? '  — ' + detail : ''}`); };
 const rect = (page, sel) => page.evaluate(s => { const el = document.querySelector(s); if (!el) return null; const r = el.getBoundingClientRect(); return { top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), width: Math.round(r.width), height: Math.round(r.height) }; }, sel);
 const scrollTo = (page, y) => page.evaluate(v => window.scrollTo({ top: v, behavior: 'instant' }), y).then(() => page.waitForTimeout(150));
@@ -85,16 +128,30 @@ async function open(page, url) {
   await page.reload();
   await page.waitForSelector('video', { timeout: 15000 });
 }
+async function waitForPlaylist(page, label) {
+  try {
+    await page.waitForSelector('.playlist-item', { timeout: 30000 });
+  } catch (e) {
+    await dumpState(page, label || 'playlist did not render');
+    throw e;
+  }
+  await page.waitForTimeout(400);
+}
+
 async function openSeries(page, url) {
   await open(page, url);
-  await page.waitForSelector('.playlist-item', { timeout: 15000 });
-  await page.waitForTimeout(400);
+  await waitForPlaylist(page, `openSeries ${url}`);
 }
 
 function freePort() { return new Promise(res => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); }); }
 async function startPhp() {
   const port = await freePort();
-  const child = spawn(process.env.PHP_BIN || 'php', ['-S', `127.0.0.1:${port}`, '-t', ROOT], { stdio: 'ignore' });
+  // PHP_CLI_SERVER_WORKERS (PHP ≥7.4): the built-in server is otherwise a
+  // single process, and a browser fetching ~40 ES modules in parallel —
+  // plus Chromium's speculative pre-connects — can leave requests queued
+  // behind one another. A few workers keep page loads deterministic.
+  const env = { ...process.env, PHP_CLI_SERVER_WORKERS: process.env.PHP_CLI_SERVER_WORKERS || '4' };
+  const child = spawn(process.env.PHP_BIN || 'php', ['-S', `127.0.0.1:${port}`, '-t', ROOT], { stdio: 'ignore', env });
   await new Promise(r => setTimeout(r, 800));
   return { base: `http://127.0.0.1:${port}`, stop: () => child.kill() };
 }
@@ -102,12 +159,12 @@ async function startPhp() {
 // ---------- suites ----------
 async function desktop(browser, base) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  const errors = []; page.on('pageerror', e => errors.push(e.message)); instrument(page);
   await mockNetwork(page, seriesFixture(60, false));
   await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} }).catch(() => {});
   await openSeries(page, `${base}/player.php?video=show`);
   await page.evaluate(() => { try { localStorage.removeItem('theaterMode'); } catch (e) {} });
-  await page.reload(); await page.waitForSelector('.playlist-item'); await page.waitForTimeout(400);
+  await page.reload(); await waitForPlaylist(page, 'desktop reload');
 
   let sb = await rect(page, '#playlistSidebar');
   const items = await page.evaluate(() => { const el = document.getElementById('playlistItems'); return { sh: el.scrollHeight, ch: el.clientHeight }; });
@@ -166,11 +223,11 @@ async function desktop(browser, base) {
 
 async function behaviours(browser, base) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  const errors = []; page.on('pageerror', e => errors.push(e.message)); instrument(page);
   await mockNetwork(page, seriesFixture(6, true));
   await openSeries(page, `${base}/player.php?video=show`);
   await page.evaluate(() => { try { localStorage.clear(); localStorage.setItem('afc_disclaimer_ack_v1', '1'); } catch (e) {} });
-  await page.reload(); await page.waitForSelector('.playlist-item'); await page.waitForTimeout(400);
+  await page.reload(); await waitForPlaylist(page, 'behaviours reload');
 
   const pl = await page.evaluate(() => ({ items: document.querySelectorAll('.playlist-item').length, picker: getComputedStyle(document.getElementById('qualitySelector')).display, options: document.querySelectorAll('#qualityMenu .quality-option').length, src: document.querySelector('video source').src }));
   check('series: encodes collapse to one entry per episode', pl.items === 6, `items=${pl.items}`);
@@ -189,7 +246,7 @@ async function behaviours(browser, base) {
   await page.waitForFunction(() => document.querySelector('video').readyState >= 1);
   await page.evaluate(() => { document.querySelector('video').currentTime = 12; }); await page.waitForTimeout(400);
   await page.evaluate(() => document.querySelector('video').pause()); await page.waitForTimeout(300);
-  await page.goto(`${base}/player.php?video=show`); await page.waitForSelector('.playlist-item'); await page.waitForTimeout(900);
+  await page.goto(`${base}/player.php?video=show`); await waitForPlaylist(page, 'series memory reload'); await page.waitForTimeout(500);
   const back = await page.evaluate(() => ({ idx: document.querySelector('.playlist-item.active').dataset.index, prompt: getComputedStyle(document.getElementById('resumePrompt')).display, text: document.getElementById('resumeText').textContent }));
   check('series: reload lands on the last-watched episode', back.idx === '2', JSON.stringify(back));
   check('series: resume prompt offered for that episode', back.prompt !== 'none' && /0:1\d/.test(back.text), JSON.stringify(back));
@@ -197,7 +254,7 @@ async function behaviours(browser, base) {
   const t = await page.evaluate(() => document.querySelector('video').currentTime);
   check('Resume seeks to the saved position', t >= 11 && t < 18, `t=${t.toFixed(1)}`);
 
-  await page.goto(`${base}/player.php?video=show&track=2&t=14`); await page.waitForSelector('.playlist-item');
+  await page.goto(`${base}/player.php?video=show&track=2&t=14`); await waitForPlaylist(page, 'deep link');
   await page.waitForFunction(() => document.querySelector('video').currentTime >= 13.5, null, { timeout: 8000 }).catch(() => {});
   const tt = await page.evaluate(() => document.querySelector('video').currentTime);
   check('?t= deep link seeks once metadata is known', tt >= 13.5 && tt < 19, `t=${tt.toFixed(1)}`);
@@ -207,7 +264,7 @@ async function behaviours(browser, base) {
 
 async function phone(browser, base) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
-  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  const errors = []; page.on('pageerror', e => errors.push(e.message)); instrument(page);
   await mockNetwork(page, seriesFixture(60, false));
   await openSeries(page, `${base}/player.php?video=show`);
   const ov = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
@@ -224,6 +281,7 @@ async function phone(browser, base) {
   await page.close();
 
   const land = await browser.newPage({ viewport: { width: 740, height: 360 }, isMobile: true, hasTouch: true });
+  instrument(land);
   await mockNetwork(land, seriesFixture(10, false));
   await openSeries(land, `${base}/player.php?video=show`);
   const pos = await land.evaluate(() => getComputedStyle(document.getElementById('playerCinema')).position);
