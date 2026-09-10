@@ -32,6 +32,11 @@ if ($api->isPost()) {
 $admin = $api->requireAdmin();
 $metrics = new MetricsService();
 
+// Email addresses are personal data: only a FULL admin sees them in the
+// users list / recent signups. Editors (curation + moderation) get the
+// rows without the email column.
+$isFullAdmin = (($admin['role'] ?? '') === 'admin');
+
 if ($api->isGet()) {
     header('Cache-Control: private, no-store');
     $action = $api->query('action', 'overview');
@@ -65,7 +70,7 @@ if ($api->isGet()) {
             )]);
 
         case 'recent-signups':
-            $api->ok(['users' => $metrics->recentSignups((int)$api->query('limit', 10))]);
+            $api->ok(['users' => $metrics->recentSignups((int)$api->query('limit', 10), $isFullAdmin)]);
 
         case 'recent-comments':
             $api->ok(['comments' => $metrics->recentComments((int)$api->query('limit', 10))]);
@@ -76,6 +81,7 @@ if ($api->isGet()) {
                 'per_page' => (int)$api->query('per_page', 25),
                 'role' => (string)$api->query('role', 'all'),
                 'search' => (string)$api->query('search', ''),
+                'include_email' => $isFullAdmin,
             ]));
 
         case 'comments-mod':

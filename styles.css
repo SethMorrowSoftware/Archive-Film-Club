@@ -697,7 +697,10 @@ button {
    ============================================== */
 .main-layout {
   display: flex;
-  min-height: calc(100vh - 56px);
+  /* 100vh fallback first; dvh (where supported) tracks the mobile browser
+     chrome so the layout doesn't overflow when the URL bar is visible. */
+  min-height: calc(100vh - var(--header-height));
+  min-height: calc(100dvh - var(--header-height));
 }
 
 /* ==============================================
@@ -1415,6 +1418,31 @@ button {
   gap: var(--space-1);
 }
 
+/* A hidden section keeps its header (and the Show button) and collapses
+   only the row of cards underneath. */
+.featured-section.is-collapsed .featured-section-scroll-container {
+  display: none;
+}
+
+/* Card title links (Staff Picks / Featured / Continue Watching). The whole
+   card is click-to-play via JS; the link is what keyboard users land on,
+   so it carries the focus ring and lights the card's play overlay. */
+.card-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.card-link:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+.recommended-card:focus-within .recommended-card-overlay,
+.featured-card:focus-within .featured-card-overlay {
+  opacity: 1;
+}
+
 .thumb-placeholder {
   width: 100%;
   height: 100%;
@@ -1423,6 +1451,31 @@ button {
   justify-content: center;
   font-size: 48px;
   opacity: 0.3;
+}
+
+/* Thumbnail failed to load: the <img> hides itself and its wrapper gets
+   .thumb-missing, which paints the placeholder via ::before. Siblings
+   (runtime badge, progress bar, remove button, play overlay) survive —
+   the old onerror replaced the wrapper's innerHTML and wiped them. */
+.thumb-missing {
+  position: relative;
+}
+
+.thumb-missing::before {
+  content: '\1F3AC';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 3rem;
+  color: var(--color-text-tertiary);
+  background: var(--color-bg-tertiary);
+  opacity: 0.6;
+}
+
+.result-card[data-mediatype="collection"] .thumb-missing::before {
+  content: '\1F4C1';
 }
 
 /* ==============================================
@@ -1643,6 +1696,17 @@ button {
 .result-card:focus-within .result-actions {
   opacity: 1;
   transform: translateY(0);
+}
+
+/* Touch devices have no hover, so the reveal-on-hover pattern leaves the
+   buttons invisible but still tappable. Show them at rest on any device
+   without hover, regardless of viewport width (the ≤768px block below
+   covers small screens that DO have a mouse). */
+@media (hover: none) {
+  .result-actions {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .result-actions .btn {
@@ -2234,7 +2298,8 @@ button {
   gap: var(--space-3);
 }
 
-.no-results::before,
+/* The no-results state renders its own inline SVG (uiFeedback.js); only
+   the fallback message still relies on this pseudo-icon. */
 .fallback-message::before {
   content: '';
   width: 64px;
@@ -2246,11 +2311,6 @@ button {
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 24 24' fill='none' stroke='%2376767e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='11' r='8'/><path d='M21 21l-4.35-4.35'/></svg>");
   background-repeat: no-repeat;
   background-position: center;
-}
-
-/* Hide the legacy pseudo-icon when the new inline SVG is rendered. */
-.no-results:has(.no-results-icon)::before {
-  display: none;
 }
 
 .no-results-icon {
@@ -3743,6 +3803,49 @@ textarea:focus-visible {
 .continue-watching-remove:focus-visible {
   outline: 2px solid var(--accent-color, #fff);
   outline-offset: 2px;
+}
+
+/* No hover on touch: keep the button visible at rest and give it a proper
+   40×40 hit area (the icon stays 14px, centred by the flex box). The JS
+   asks for confirmation before removing on these devices. */
+@media (hover: none) {
+  .continue-watching-remove {
+    opacity: 1;
+    transform: none;
+    width: 40px;
+    height: 40px;
+    top: 4px;
+    right: 4px;
+  }
+}
+
+/* collection.php item cards: the <a> is the card itself; in owner mode a
+   wrapper carries the Remove button alongside it (a button can't live
+   inside a link). */
+.collection-card-item {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.collection-card-item > .collection-card {
+  flex: 1;
+}
+
+.collection-card-item .collection-card-remove {
+  align-self: flex-end;
+  margin: var(--space-2) 0 0;
+}
+
+/* AuthNav placeholder: same footprint as the "Sign in / Sign up" pair so
+   the header doesn't shift when the real controls arrive. */
+.header-auth-placeholder {
+  display: inline-block;
+  width: 152px;
+  height: 34px;
+  border-radius: var(--radius-full);
+  background: var(--color-bg-tertiary);
+  opacity: 0.5;
 }
 
 /* =====================================================

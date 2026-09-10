@@ -55,7 +55,7 @@ if (!function_exists('escapeAttr')) {
     <?php if (!$hideSearch): ?>
     <form id="searchForm" class="header-search-form" role="search" action="index.php" method="get">
       <div class="header-search-input-wrapper">
-        <input name="q" type="search" class="header-search-input" placeholder="Search videos, creators, collections..." autocomplete="off" aria-label="Search videos" />
+        <input name="search" type="search" class="header-search-input" placeholder="Search videos, creators, collections..." autocomplete="off" aria-label="Search videos" />
       </div>
       <button type="submit" class="search-submit-btn" aria-label="Search">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">

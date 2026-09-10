@@ -115,6 +115,11 @@
 # without us having to write a positional regex.
 RedirectMatch 404 (^|/)(electron|node_modules|logs)(/|$)
 
+# A deployed .git/ directory (git-pull deploys are common on cPanel) would
+# otherwise serve the whole source history, config and reflog. The dotfile
+# FilesMatch above only covers files, not directory paths.
+RedirectMatch 404 (^|/)\.git(/|$)
+
 # Disable directory listing
 <IfModule mod_autoindex.c>
     Options -Indexes

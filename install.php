@@ -201,43 +201,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             sort($migrationFiles); // 001_*, 002_*, 003_*, 004_*
 
+            // The admin "refresh schema" action runs the same files through
+            // MaintenanceService::runMigrations(); the statement splitter is
+            // shared so both runners agree on where one statement ends.
+            require_once __DIR__ . '/services/Admin/MaintenanceService.php';
+
             foreach ($migrationFiles as $migrationFile) {
                 $sql = file_get_contents($migrationFile);
 
-                // Strip SQL line comments BEFORE splitting on `;`. A comment
-                // like `-- items; deleting a collection deletes its items.`
-                // contains a semicolon in the text, and a naive
-                // explode(';', $sql) would split the file mid-comment,
-                // yielding a second chunk whose first line is no longer
-                // comment-prefixed. MariaDB then tries to parse the comment
-                // prose as SQL and errors out with a 1064 syntax error.
-                //
-                // Our migrations don't use /* ... */ block comments and
-                // don't embed `--` inside string literals, so a line-level
-                // strip is sufficient and safe. (Extend this if we start
-                // using either.)
-                $sql = preg_replace('/^\s*--[^\n]*$/m', '', $sql);
-
-                // Split into individual statements
-                $statements = array_filter(
-                    array_map('trim', explode(';', $sql)),
-                    function($s) { return !empty($s); }
-                );
+                // Split into individual statements with the quote/comment-
+                // aware splitter (a naive explode(';') breaks on semicolons
+                // inside `--` comments and inside the string literals that
+                // migration 007 builds its dynamic ALTERs from).
+                $statements = MaintenanceService::splitSqlStatements($sql);
 
                 foreach ($statements as $statement) {
-                    if (empty(trim($statement))) continue;
+                    if (trim($statement) === '') continue;
                     try {
-                        $db->query($statement);
+                        // exec(), NOT query(): migration 007 uses
+                        // PREPARE/EXECUTE, which MySQL refuses inside the
+                        // server-side prepared-statement protocol query() uses.
+                        $db->exec($statement);
                     } catch (Throwable $e) {
                         // Swallow "already exists / duplicate column" errors
                         // so re-runs and partially-applied migrations don't
                         // block the installer. The strings below cover both
-                        // MySQL and MariaDB phrasing.
-                        $msg = $e->getMessage();
-                        if (stripos($msg, 'already exists') === false
-                            && stripos($msg, 'Duplicate column') === false
-                            && stripos($msg, 'Duplicate key name') === false
-                            && stripos($msg, 'Multiple primary key') === false) {
+                        // MySQL and MariaDB phrasing. Must stay in sync with
+                        // MaintenanceService::isIgnorableMigrationError().
+                        if (!MaintenanceService::isIgnorableMigrationError($e->getMessage())) {
                             throw $e;
                         }
                     }

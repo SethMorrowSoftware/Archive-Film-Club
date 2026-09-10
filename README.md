@@ -6,12 +6,12 @@ A feature-rich web application for discovering and watching classic films from [
 
 ### For Viewers
 - **Search & Browse** - Full-text search across Archive.org's video library with 20+ collection filters and search suggestions
-- **Video Player** - Dedicated player page with multi-episode playlists, quality selector, theater mode, resume-from-where-you-left-off, and an "Up Next" countdown that survives auto-advance
+- **Video Player** - Dedicated player page with multi-episode playlists, a per-episode quality selector, theater mode, resume-from-where-you-left-off (including which episode of a series you were on), keyboard shortcuts (`?` lists them), lock-screen / hardware media controls, and an "Up Next" countdown that survives auto-advance. On desktop the playlist is a viewport-height rail beside the video that scrolls internally, so a 200-episode series never turns the page into a long scroll; on phones the video stays pinned under the header while you browse the list
 - **User Accounts** - Register, log in, log out, password reset by email, optional email verification, "remember me" tokens, and account self-service
 - **Bookmarks** - Save favorite videos for quick access; survives logout via guest session and merges into your account on signup
 - **Collections** - Create personal collections of videos, reorder items, add per-item notes, and share publicly with a slug-based URL
 - **Watch History** - Automatic progress tracking with resume support
-- **Offline Support** - Service Worker caching for offline browsing of previously visited pages
+- **Offline Support** - Service Worker keeps the app shell, recent search results, metadata and thumbnails available offline (pages with per-user content are deliberately never cached)
 - **Theme Toggle** - Switch between dark and light mode
 - **Responsive Design** - Works on desktop, tablet, and mobile
 
@@ -86,9 +86,9 @@ Visit `https://yourdomain.com/install.php` in your browser. The setup wizard wil
 4. Migrate any existing JSON data (or skip on a fresh install)
 5. Show you the post-install lock-down checklist
 
-> The first user registered through the installer (or via `register.php` on a
-> fresh install) is automatically promoted to `admin`. Every subsequent signup
-> defaults to the `viewer` role.
+> The admin account is created only by the installer (step 3). Public
+> signups through `register.php` are always created with the `viewer` role —
+> promote further admins/editors from **Admin → Users**.
 
 > **Important — do one of the following after setup:**
 >
@@ -117,11 +117,18 @@ mysql -u your_db_user -p your_database_name < db/migrations/006_comments.sql
 mysql -u your_db_user -p your_database_name < db/migrations/007_comment_user_set_null.sql
 ```
 
-After the migrations are in place, create the first admin account by
-visiting `register.php` in your browser — the first registered account is
-auto-promoted to `admin`. Alternatively, set `ADMIN_PASSWORD` in `.env`
-as a break-glass fallback. It **must** be a `password_hash()` value, not
-plaintext — generate one with:
+After the migrations are in place, create the first admin account. Public
+signups via `register.php` are always `viewer`, so either run the installer
+(`install.php`, step 3 creates the admin and writes the `.installed` lock),
+or register an account and promote it directly in SQL:
+
+```sql
+UPDATE users SET role = 'admin' WHERE username = 'your-username' AND is_guest = 0;
+```
+
+Alternatively, set `ADMIN_PASSWORD` in `.env` as a break-glass fallback for
+the admin panel. It **must** be a `password_hash()` value, not plaintext —
+generate one with:
 
 ```bash
 php -r "echo password_hash('your-strong-password', PASSWORD_DEFAULT), \"\n\";"
@@ -152,7 +159,8 @@ automate.
 4. **File permissions.** Most cPanel hosts run PHP as the owning user
    under suPHP/PHP-FPM, so default perms work — but verify:
    - The install root, `thumbnails/`, and `logs/` need to be **writable**
-     by the PHP user (typically `0755` on dirs, `0644` on files).
+     by the PHP user (typically `0755` on dirs, `0644` on files). `logs/`
+     also holds the break-glass login throttle state.
    - The installer auto-creates `logs/` and `cache/` paths it needs.
 5. **Install SSL first**, then enable HTTPS enforcement. The root
    `.htaccess` ships with the force-HTTPS block **commented out**.
@@ -180,8 +188,9 @@ automate.
    PHP `mail()` fallback works on most shared hosts but emails are often
    spam-filtered.
 8. **Add the cron jobs.** *cPanel → Cron Jobs*. Use the full paths the
-   File Manager shows (right-click any file → Copy Path). Suggested
-   schedules:
+   File Manager shows (right-click any file → Copy Path). `cache_cleanup`
+   also reaps guest visitor rows idle for 30+ days, so the `users` table
+   doesn't grow with every crawler hit. Suggested schedules:
    ```
    */5  * * * *  php /home/cpaneluser/public_html/cron/process_cache_queue.php
    0    * * * *  php /home/cpaneluser/public_html/cron/cache_cleanup.php
@@ -307,9 +316,13 @@ videos/
 │   ├── main.js                # Electron main process
 │   └── server.js              # Express backend
 │
+├── tests/                     # Dependency-free checks
+│   ├── smoke.php              # Boot + class-link + unit checks (CI, no DB)
+│   └── browser/               # Playwright regression test for the player page
+│
 ├── .env.example               # Environment template
 ├── .htaccess                  # Apache rewrite rules + security denies
-└── package.json               # Node.js dependencies
+└── package.json               # Node.js dependencies (Electron only)
 ```
 
 ## Configuration
@@ -348,7 +361,7 @@ videos/
 Set up cron jobs for automated cache management:
 
 ```crontab
-# Clean expired cache entries every hour
+# Clean expired cache entries + idle guest rows every hour
 0 * * * * php /path/to/videos/cron/cache_cleanup.php
 
 # Warm cache for popular searches daily
@@ -374,12 +387,13 @@ sanitizers.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/search.php` | GET | Search videos (`q`, `collection`, `sort`, `page`, `rows`) |
-| `/api/metadata.php` | GET | Get video metadata (`id`) |
+| `/api/search.php` | GET | Search videos (`q`, `collection`, `sort`, `page`, `rows`); page-1 searches are recorded in the signed-in user's search history |
+| `/api/metadata.php` | GET | Get video metadata (`id`); cache hits and misses return the same normalized shape |
+| `/api/metadata-batch.php` | GET | Metadata for up to 50 `ids` (comma-separated); at most 5 uncached items are fetched synchronously, the rest are queued and returned as stubs |
 | `/api/thumbnail.php` | GET | Get/cache thumbnail (`id`) |
 | `/api/recommendations.php` | GET | Get staff picks |
 | `/api/sections.php` | GET | Get featured sections |
-| `/api/settings.php` | GET | Get site settings |
+| `/api/settings.php` | GET | Public site settings, projected through the same allow-list the admin can write (operational cache knobs never leave the server) |
 | `/api/bookmarks.php` | GET/POST/DELETE | Manage bookmarks for the current user/guest |
 | `/api/history.php` | GET/POST | Watch history & progress for the current user/guest |
 | `/api/collections.php` | GET/POST | Collections CRUD; supports public lookup by `username` + `slug` |
@@ -390,7 +404,7 @@ sanitizers.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/auth/register.php` | POST | Create an account; first registered account is auto-promoted to admin |
+| `/api/auth/register.php` | POST | Create an account (always the `viewer` role; admins are created by the installer or promoted in Admin → Users) |
 | `/api/auth/login.php` | POST | Sign in; issues a session and optional remember-me token |
 | `/api/auth/logout.php` | POST | Invalidate session + remember-me token |
 | `/api/auth/me.php` | GET | Return the current user (used to hydrate the header `AuthNav`) |
@@ -403,8 +417,9 @@ sanitizers.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/cache.php` | GET/POST | Cache stats (GET); destructive actions require `admin`/`editor` role |
-| `/api/diagnose.php` | GET | System diagnostics; admin-gated |
+| `/api/cache.php` | GET/POST | Cache stats (GET); `queue` is open, `cache_immediate`/`cache_single` are capped per session (25 items / 10 min, then 429), destructive actions require `admin`/`editor` role |
+| `/api/diagnose.php` | GET | System diagnostics; full `admin` only |
+| `/api/settings.php` | POST | Update site settings; full `admin` only (editors curate but can't rebrand). Partial updates: only keys present in the body are written |
 | `/api/admin/metrics.php` | GET/POST | Dashboard metrics, user-role management, comment moderation (role changes are full-admin-only) |
 | `/api/admin/maintenance.php` | GET/POST | DB status, SQL backup/restore, cache refresh, content reset; full-admin-only with type-to-confirm |
 
@@ -426,10 +441,19 @@ The app ships with a verified security baseline:
 - **SSRF pin** — the metadata + thumbnail proxies refuse to fetch anything
   outside `archive.org`
 - **Open-redirect whitelist** via `afc_safe_next()` (server + client)
-- **`.htaccess` defenses** — HTTPS force, deny on `.env`, `Database.php`,
-  `config.php`, `*.md`, `*.sql`, `*.log`, no directory indexing, and
-  standard `X-Content-Type-Options` / `X-Frame-Options` /
-  `Referrer-Policy` headers
+- **`.htaccess` defenses** — HTTPS force (opt-in after SSL), deny on `.env`,
+  `Database.php`, `config.php`, `*.md`, `*.sql`, `*.log`, the `.git/`
+  directory, `admin/views/` + `admin/controllers/`, no directory indexing,
+  a lenient `Content-Security-Policy`, and standard `X-Content-Type-Options`
+  / `X-Frame-Options` / `Referrer-Policy` / `Permissions-Policy` headers
+- **Remember-me tokens are single-use** — each auto-login rotates the token,
+  regenerates the session id, and rotates the CSRF token
+- **Break-glass admin login is throttled** without the database (file-backed,
+  5 failures → 15-minute lockout) and can save settings / picks / sections to
+  the JSON recovery files while MySQL is down
+- **Client-side HTML sanitizer** for archive.org descriptions is a strict
+  allow-list parsed in an inert `DOMParser` document (no `on*`, no
+  `javascript:`/`data:` links, no `svg`/`iframe`/`form`)
 - **Installer dual-guard** — refuses to run once a `.installed` marker
   exists or once an admin row is present, and `chmod`s `.env` to `0600`
 
@@ -438,12 +462,41 @@ The app ships with a verified security baseline:
 > bottom of `.htaccess`. Unset `ADMIN_PASSWORD` in `.env` once you have a
 > real admin account.
 
-Known gaps accepted for beta:
-`Content-Security-Policy` and `Strict-Transport-Security` headers are not yet
-emitted. (CSRF protection — `csrf_token()`/`csrf_verify()` in `bootstrap.php`,
-enforced by `ApiController::requireCsrf()` on every non-GET endpoint — and
+Known gaps accepted for beta: the `Content-Security-Policy` still allows
+`'unsafe-inline'` scripts/styles (the admin panel and brand-colour `<style>`
+blocks depend on it), and `Strict-Transport-Security` ships commented out
+until you have confirmed HTTPS works. (CSRF protection —
+`csrf_token()`/`csrf_verify()` in `bootstrap.php`, enforced by
+`ApiController::requireCsrf()` on every non-GET endpoint — and
 per-IP/per-account login rate-limiting — `UserAuthService::isLoginThrottled()`
 with migration `005_auth_throttle.sql` — are both implemented.)
+
+## Testing
+
+There is no build step, so the checks stay dependency-free:
+
+```bash
+bash scripts/check-syntax.sh all   # php -l + ESM-aware node --check on every file
+php tests/smoke.php                # boots bootstrap.php, links every class, unit-checks
+                                   # the SQL splitter / colour guard — no DB needed
+```
+
+Both run in CI (`.github/workflows/ci.yml`) on PHP 7.4 and 8.3.
+
+The player also has a browser regression test that drives the real page in
+Chromium with archive.org and the local API mocked at the network layer. It
+covers the click-to-pause / keyboard double-toggle bugs, the playlist rail
+layout at desktop and phone widths, theater mode, per-episode quality
+switching, series resume and `?t=` deep links. It needs PHP (it starts its own
+`php -S`) and Playwright's Chromium:
+
+```bash
+npm i --no-save playwright && npx playwright install chromium   # once
+node tests/browser/player.test.js
+```
+
+CI runs it too (the `browser` job), so a layout or playback regression fails
+the pull request.
 
 ## Desktop App (Electron)
 

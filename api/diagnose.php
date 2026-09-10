@@ -24,13 +24,15 @@ if (class_exists('UserAuthService')) {
 if (!$currentUser && class_exists('AdminAuthService')) {
     try { $currentUser = (new AdminAuthService())->validateSession(); } catch (Throwable $e) {}
 }
+// FULL admins only. Editors curate content; the install path, DB name and
+// extension list are operator information.
 $role = $currentUser['role'] ?? null;
-if ($role !== 'admin' && $role !== 'editor') {
+if ($role !== 'admin') {
     http_response_code(403);
     header('Content-Type: text/html; charset=utf-8');
     echo '<!DOCTYPE html><html><head><title>Forbidden</title><meta name="robots" content="noindex,nofollow"></head><body style="font-family:sans-serif;max-width:600px;margin:60px auto;padding:20px">';
     echo '<h1>403 Forbidden</h1>';
-    echo '<p>The server diagnostic page is restricted to administrators.</p>';
+    echo '<p>The server diagnostic page is restricted to full administrators.</p>';
     echo '<p><a href="../admin.php">Admin login</a></p>';
     echo '</body></html>';
     exit;

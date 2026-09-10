@@ -1,7 +1,22 @@
 /**
  * Service Worker for Comet Cult Film Club
- * Version: 1.4.0
+ * Version: 1.5.0
  * Features: Offline support, intelligent caching, background sync
+ *
+ * v1.5 changes:
+ *   - HTML responses for per-user pages (account, collections, auth flows,
+ *     admin, installer) are never written to STATIC_CACHE, nor is any
+ *     response marked Cache-Control: private / no-store. Previously every
+ *     same-origin document was cached, so one visitor's account page could
+ *     be replayed to the next person on a shared browser.
+ *   - STATIC_CACHE and DYNAMIC_CACHE are trimmed after every put; the
+ *     dynamic cache had no cap at all outside the archive.org path.
+ *   - Install precache and background asset refreshes bypass the HTTP
+ *     cache (cache: 'reload' / 'no-cache') so a stale styles.css/app.js
+ *     pinned by an intermediate cache can't be re-pinned into the SW.
+ *   - Dropped the never-cached ./images/placeholder.png lookup; the
+ *     inline 1x1 PNG fallback is now decoded to bytes instead of being
+ *     served as the base64 text.
  *
  * v1.4 changes:
  *   - SWR strategy now skips the background revalidation when the cached
@@ -36,7 +51,7 @@
  *   - metadata-batch.php gets cache-first treatment like metadata.php
  */
 
-const CACHE_VERSION = 'ccfc-v6';
+const CACHE_VERSION = 'ccfc-v7';
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const DYNAMIC_CACHE = `${CACHE_VERSION}-dynamic`;
 const IMAGE_CACHE = `${CACHE_VERSION}-images`;
@@ -65,6 +80,12 @@ const STATIC_ASSETS = [
 const STATIC_ASSETS_OPTIONAL = [
   'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto:wght@400;500;600;700&display=swap',
 ];
+
+// HTML documents that are rendered per-user (server-side auth state,
+// personal data) or per-request (auth flows, admin, installer). Never
+// cached: a cached copy would replay one visitor's page to the next person
+// on the same browser, and an offline fallback for these is meaningless.
+const NO_CACHE_HTML = /\/(account|collections?|admin|install|login|register|forgot-password|reset-password|verify-email)\.php$/i;
 
 // Cache size limits
 const CACHE_LIMITS = {
@@ -95,8 +116,10 @@ self.addEventListener('install', event => {
   event.waitUntil(
     (async () => {
       const cache = await caches.open(STATIC_CACHE);
+      // cache: 'reload' bypasses the HTTP cache so a new SW version never
+      // precaches an old asset the browser still had pinned.
       await Promise.allSettled(
-        STATIC_ASSETS.map(url => cache.add(url).catch(err => {
+        STATIC_ASSETS.map(url => cache.add(new Request(url, { cache: 'reload' })).catch(err => {
           console.warn('[SW] precache miss for', url, err && err.message);
         }))
       );
@@ -262,6 +285,7 @@ async function handleCacheFirst(request, ttl) {
   if (await isCacheable(networkResponse, url)) {
     const cache = await caches.open(DYNAMIC_CACHE);
     cache.put(request, await stampCachedAt(networkResponse.clone()))
+         .then(() => trimCache(DYNAMIC_CACHE, CACHE_LIMITS.dynamic))
          .catch(() => {});
   }
 
@@ -279,6 +303,7 @@ async function handleNetworkFirst(request, ttl) {
     if (await isCacheable(networkResponse, url)) {
       const cache = await caches.open(DYNAMIC_CACHE);
       cache.put(request, await stampCachedAt(networkResponse.clone()))
+           .then(() => trimCache(DYNAMIC_CACHE, CACHE_LIMITS.dynamic))
            .catch(() => {});
     }
 
@@ -327,6 +352,7 @@ async function handleStaleWhileRevalidate(request, ttl) {
       if (await isCacheable(networkResponse, url)) {
         const cache = await caches.open(DYNAMIC_CACHE);
         cache.put(request, await stampCachedAt(networkResponse.clone()))
+             .then(() => trimCache(DYNAMIC_CACHE, CACHE_LIMITS.dynamic))
              .catch(err => console.warn('[SW] Cache put failed:', err));
       }
       return networkResponse;
@@ -360,6 +386,7 @@ async function handleStaleWhileRevalidate(request, ttl) {
  * - CSS/JS: cache-first with background refresh.
  */
 async function handleAppRequest(request) {
+  const url = new URL(request.url);
   const accept = request.headers.get('accept') || '';
   const isHtml = accept.includes('text/html')
                  || request.destination === 'document';
@@ -373,14 +400,22 @@ async function handleAppRequest(request) {
     // in the whole app.
     try {
       const networkResponse = await fetchWithTimeout(request, 15000);
-      if (networkResponse.ok) {
+      if (networkResponse.ok && isCacheableHtml(request, networkResponse)) {
         const cache = await caches.open(STATIC_CACHE);
         cache.put(request, await stampCachedAt(networkResponse.clone()))
+             .then(() => trimCache(STATIC_CACHE, CACHE_LIMITS.static))
              .catch(() => {});
       }
       return networkResponse;
     } catch (e) {
-      const cachedResponse = await caches.match(request);
+      let cachedResponse = await caches.match(request);
+      // PHP's session layer stamps every page Cache-Control: no-store, so
+      // index.php itself is never runtime-cached (see isCacheableHtml).
+      // The install precache of './' IS the homepage though — serve it
+      // for an explicit index.php navigation when offline.
+      if (!cachedResponse && /\/index\.php$/.test(url.pathname)) {
+        cachedResponse = await caches.match('./');
+      }
       if (cachedResponse) return cachedResponse;
 
       // Real network error (TypeError: Failed to fetch) → offline page.
@@ -415,6 +450,7 @@ async function handleAppRequest(request) {
     if (networkResponse.ok) {
       const cache = await caches.open(STATIC_CACHE);
       cache.put(request, await stampCachedAt(networkResponse.clone()))
+           .then(() => trimCache(STATIC_CACHE, CACHE_LIMITS.static))
            .catch(() => {});
     }
     return networkResponse;
@@ -426,6 +462,24 @@ async function handleAppRequest(request) {
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     });
   }
+}
+
+/**
+ * May this HTML document be written to STATIC_CACHE?
+ *
+ * Rejects per-user / per-request pages by path, anything under /api/ or
+ * /admin/, and any response the server itself marked private or no-store.
+ * (Set-Cookie is checked too, though the platform hides that header from
+ * SW scripts — the path + Cache-Control checks do the real work.)
+ */
+function isCacheableHtml(request, response) {
+  const url = new URL(request.url);
+  if (NO_CACHE_HTML.test(url.pathname)) return false;
+  if (url.pathname.includes('/api/') || url.pathname.includes('/admin/')) return false;
+  const cc = (response.headers.get('cache-control') || '').toLowerCase();
+  if (cc.includes('private') || cc.includes('no-store')) return false;
+  if (response.headers.has('set-cookie')) return false;
+  return true;
 }
 
 /**
@@ -515,13 +569,13 @@ async function handleImageRequest(request) {
   } catch (error) {
     console.error('[SW] Image request failed:', error);
 
-    // Return placeholder image if available
-    const placeholderImage = await caches.match('./images/placeholder.png');
-    if (placeholderImage) return placeholderImage;
-
-    // Return a 1x1 transparent PNG as ultimate fallback
+    // 1x1 transparent PNG as the fallback. atob() yields a binary *string*;
+    // it has to become real bytes or the browser gets a text body with an
+    // image/png label and renders nothing (which made the page's onerror
+    // placeholder never fire either).
+    const b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
     return new Response(
-      atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='),
+      Uint8Array.from(atob(b64), c => c.charCodeAt(0)),
       {
         headers: {
           'Content-Type': 'image/png',
@@ -609,10 +663,13 @@ async function isCacheable(response, url) {
  */
 async function fetchAndUpdateCache(request, cacheName) {
   try {
-    const networkResponse = await fetch(request);
+    // cache: 'no-cache' forces revalidation with the origin so an asset
+    // the HTTP cache still considers fresh can't be re-pinned as-is.
+    const networkResponse = await fetch(new Request(request, { cache: 'no-cache' }));
     if (networkResponse.ok) {
       const cache = await caches.open(cacheName);
-      cache.put(request, await stampCachedAt(networkResponse));
+      await cache.put(request, await stampCachedAt(networkResponse));
+      trimCache(cacheName, cacheName === STATIC_CACHE ? CACHE_LIMITS.static : CACHE_LIMITS.dynamic);
     }
   } catch (error) {
     // Background refresh failure is non-fatal; the previous cached copy
@@ -688,7 +745,9 @@ async function trimCache(cacheName, limit) {
  * Message handler for cache control
  */
 self.addEventListener('message', event => {
-  const { action, data } = event.data;
+  // postMessage(null) / a non-object payload used to throw here and kill
+  // the handler for that message.
+  const { action, data } = event.data || {};
   
   switch (action) {
     case 'SKIP_WAITING':

@@ -45,6 +45,29 @@ try {
         'sort' => $sort,
     ]);
 
+    // Record the search for the account's "recent searches" and the admin
+    // search metrics — nothing else writes search_history. Non-fatal: history
+    // must never break search. First page only, so paging through one result
+    // set doesn't count as N searches; crawlers resolve to a transient guest
+    // with no users row and are skipped so nothing is ever written for them.
+    if (!empty($result['success']) && $page === 1) {
+        try {
+            $context = new UserContext();
+            if (!$context->isTransient()) {
+                $resultCount = (int)($result['data']['response']['numFound'] ?? 0);
+                $history = new SearchHistoryService();
+                $history->record(
+                    $context->currentId(),
+                    mb_substr($query, 0, 500),
+                    ['collection' => $collection, 'sort' => $sort],
+                    $resultCount
+                );
+            }
+        } catch (Throwable $e) {
+            error_log('[api/search] history: ' . $e->getMessage());
+        }
+    }
+
     // HTTP cache headers — these govern how often the BROWSER and the
     // service worker come back to the server, separate from how often
     // the server comes back to archive.org (which is now ~once per query

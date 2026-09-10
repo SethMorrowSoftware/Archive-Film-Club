@@ -29,6 +29,32 @@ $api->requireCsrf();
 // session (protected by SameSite=Lax + no-CORS).
 $ADMIN_ONLY_ACTIONS = ['process_queue', 'refresh_stale', 'stats'];
 
+// `cache_immediate` and `cache_single` do SYNCHRONOUS outbound fetches
+// against archive.org (metadata + thumbnail download + GD resize) on behalf
+// of any anonymous session. The client only uses cache_single for the
+// currently-playing video (BackgroundCacheService.cacheItemImmediately) and
+// batches everything else through `queue`, so a real user needs a handful
+// per visit — a per-session budget stops one session turning the endpoint
+// into an upstream fan-out. `queue` stays unmetered (it only inserts rows).
+$IMMEDIATE_BUDGET_MAX = 25;       // items
+$IMMEDIATE_BUDGET_WINDOW = 600;   // seconds (10 minutes)
+$chargeImmediateBudget = function (int $cost) use ($api, $IMMEDIATE_BUDGET_MAX, $IMMEDIATE_BUDGET_WINDOW): void {
+    $now = time();
+    $budget = $_SESSION['cache_immediate_budget'] ?? null;
+    if (!is_array($budget) || ($now - (int)($budget['start'] ?? 0)) >= $IMMEDIATE_BUDGET_WINDOW) {
+        $budget = ['start' => $now, 'count' => 0];
+    }
+    if ((int)$budget['count'] + $cost > $IMMEDIATE_BUDGET_MAX) {
+        $retryAfter = max(1, $IMMEDIATE_BUDGET_WINDOW - ($now - (int)$budget['start']));
+        header('Retry-After: ' . $retryAfter);
+        $api->error('Immediate-cache budget exhausted for this session; queue items instead or retry later.', 429, [
+            'retry_after' => $retryAfter,
+        ]);
+    }
+    $budget['count'] = (int)$budget['count'] + $cost;
+    $_SESSION['cache_immediate_budget'] = $budget;
+};
+
 try {
     $body = $api->jsonBody();
     $action = $body['action'] ?? 'queue';
@@ -81,6 +107,7 @@ try {
                 $api->error('Items array is required', 400);
             }
             $items = array_slice($items, 0, 5);
+            $chargeImmediateBudget(count($items));
             $results = $localStorageService->batchCacheFromSearch($items, true);
             $api->ok(['results' => $results]);
             break;
@@ -91,6 +118,7 @@ try {
             if (!$archiveId || !preg_match('/^[a-zA-Z0-9_-]+$/', $archiveId)) {
                 $api->error('Valid archive_id is required', 400);
             }
+            $chargeImmediateBudget(1);
             $cacheThumbnail = $body['cache_thumbnail'] ?? true;
             $result = $localStorageService->cacheItem($archiveId, null, $cacheThumbnail);
             $api->ok(['result' => $result]);

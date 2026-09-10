@@ -10,6 +10,23 @@
         let featuredSections = Array.isArray(__bootstrap.featuredSections) ? __bootstrap.featuredSections : [];
         let currentEditingSection = null;
         let dirtyPanels = new Set();
+        let modalLastFocused = null;   // element to return focus to when the video search modal closes
+        let modalKeydownHandler = null;
+        let modalSearch = { sectionId: null, page: 1, totalPages: 1 };
+
+        // Panels that have something to save. Every other panel (dashboard,
+        // metrics, users, comments-mod, maintenance) is read-only or saves
+        // through its own module, so the global Save button and the
+        // unsaved-changes tracking are restricted to these.
+        const SAVEABLE_PANELS = new Set(['staff-picks', 'site-settings', 'appearance', 'display', 'sections']);
+        // Inline status element under each saveable panel's form.
+        const PANEL_STATUS_IDS = {
+            'staff-picks': 'staffPicksStatus',
+            'site-settings': 'siteSettingsStatus',
+            'appearance': 'appearanceStatus',
+            'display': 'displayStatus',
+            'sections': 'sectionsStatus'
+        };
 
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
@@ -18,8 +35,16 @@
             setupNavigation();
             setupColorPickers();
             setupDragAndDrop();
+            setupSectionVideoDragAndDrop();
             setupChangeTracking();
             updateSaveButtonVisibility();
+
+            // Warn before the page is unloaded with unsaved edits.
+            window.addEventListener('beforeunload', (e) => {
+                if (dirtyPanels.size === 0) return;
+                e.preventDefault();
+                e.returnValue = '';
+            });
 
             // Enter key to search
             document.getElementById('searchInput').addEventListener('keypress', (e) => {
@@ -48,7 +73,12 @@
                 saving: '<svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="animation: spin 0.8s linear infinite;"><path d="M21 12a9 9 0 11-6.219-8.56"/></svg>'
             };
 
-            toast.innerHTML = `${icons[type] || icons.info}<span>${message}</span>`;
+            // Icon markup is static; the message is caller-supplied (API error
+            // strings etc.), so it goes in via textContent.
+            toast.innerHTML = icons[type] || icons.info;
+            const text = document.createElement('span');
+            text.textContent = message;
+            toast.appendChild(text);
             container.appendChild(toast);
 
             setTimeout(() => {
@@ -57,39 +87,33 @@
             }, duration);
         }
 
-        // Change tracking (per-panel, uses event delegation for dynamic elements)
+        // Change tracking (per-panel, uses event delegation for dynamic elements).
+        // Only inputs that live inside a saveable panel count: the search /
+        // filter controls on Users and Metrics also use .form-input but have
+        // nothing to save.
         function setupChangeTracking() {
             const content = document.querySelector('.admin-content');
-            content.addEventListener('input', (e) => {
-                if (e.target.matches('.form-input, .form-select, .color-picker, .toggle input')) {
-                    markUnsaved();
-                }
-            });
-            content.addEventListener('change', (e) => {
-                if (e.target.matches('.form-input, .form-select, .color-picker, .toggle input')) {
-                    markUnsaved();
-                }
-            });
+            const onEdit = (e) => {
+                if (!e.target.matches('.form-input, .form-select, .color-picker, .toggle input')) return;
+                const panelEl = e.target.closest('.panel');
+                const panel = panelEl ? panelEl.id.replace(/^panel-/, '') : currentPanel;
+                markUnsaved(panel);
+            };
+            content.addEventListener('input', onEdit);
+            content.addEventListener('change', onEdit);
         }
 
-        function markUnsaved() {
-            if (currentPanel === 'dashboard') return;
-            dirtyPanels.add(currentPanel);
+        function markUnsaved(panel = currentPanel) {
+            if (!SAVEABLE_PANELS.has(panel)) return;
+            dirtyPanels.add(panel);
             updateUnsavedIndicator();
         }
 
-        function clearUnsaved() {
-            // Only clear the panel(s) that were actually saved
-            if (currentPanel === 'staff-picks') {
-                dirtyPanels.delete('staff-picks');
-            } else if (currentPanel === 'sections') {
-                dirtyPanels.delete('sections');
-            } else {
-                // site-settings, appearance, display all share one save endpoint
-                dirtyPanels.delete('site-settings');
-                dirtyPanels.delete('appearance');
-                dirtyPanels.delete('display');
-            }
+        // Clear only the panel(s) that were actually saved. Callers name the
+        // panels explicitly because a save can finish after the user has
+        // already switched to a different panel.
+        function clearUnsaved(...panels) {
+            panels.forEach(p => dirtyPanels.delete(p));
             updateUnsavedIndicator();
         }
 
@@ -100,7 +124,24 @@
 
         function updateSaveButtonVisibility() {
             const btn = document.getElementById('globalSaveBtn');
-            btn.style.display = currentPanel === 'dashboard' ? 'none' : 'inline-flex';
+            btn.style.display = SAVEABLE_PANELS.has(currentPanel) ? 'inline-flex' : 'none';
+        }
+
+        // Inline save result under the panel's form, in addition to the toast
+        // (which disappears after a few seconds). Uses the .save-status styles.
+        function setSaveStatus(panel, message, type) {
+            const el = document.getElementById(PANEL_STATUS_IDS[panel] || '');
+            if (!el) return;
+            clearTimeout(el._hideTimer);
+            el.className = 'save-status ' + type;
+            el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+            el.textContent = message;
+            if (type === 'success') {
+                el._hideTimer = setTimeout(() => {
+                    el.className = '';
+                    el.textContent = '';
+                }, 8000);
+            }
         }
 
         function closeSidebar() {
@@ -119,9 +160,20 @@
         }
 
         function switchPanel(panel) {
-            // Update nav items
+            // Offer to save before leaving a panel with unsaved edits. The
+            // edits stay in the (hidden) panel either way; the beforeunload
+            // guard above covers reloads.
+            if (panel !== currentPanel && dirtyPanels.has(currentPanel)) {
+                if (confirm('You have unsaved changes on this panel. Save them before switching?')) {
+                    saveCurrentPanel();
+                }
+            }
+
+            // Update nav items (they are ARIA tabs, so keep aria-selected in sync)
             document.querySelectorAll('.nav-item[data-panel]').forEach(item => {
-                item.classList.toggle('active', item.dataset.panel === panel);
+                const isActive = item.dataset.panel === panel;
+                item.classList.toggle('active', isActive);
+                item.setAttribute('aria-selected', isActive ? 'true' : 'false');
             });
 
             // Update panels
@@ -180,9 +232,22 @@
             });
         }
 
-        // Drag and Drop
+        // Drag and Drop (Staff Picks list). Bound once: #selectedList is a
+        // permanent container whose innerHTML is re-rendered, so delegated
+        // listeners survive every render without stacking.
         function setupDragAndDrop() {
             const list = document.getElementById('selectedList');
+            if (!list || list.dataset.listenersBound) return;
+            list.dataset.listenersBound = '1';
+
+            // Remove button (no inline handler; the id is read from data-id)
+            list.addEventListener('click', (e) => {
+                const btn = e.target.closest('.selected-item-remove');
+                if (!btn) return;
+                e.stopPropagation();
+                const item = btn.closest('.selected-item');
+                if (item) removeVideo(item.dataset.id);
+            });
 
             list.addEventListener('dragstart', (e) => {
                 if (e.target.classList.contains('selected-item')) {
@@ -235,6 +300,7 @@
                 if (video) newOrder.push(video);
             });
             selectedVideos = newOrder;
+            markUnsaved('staff-picks');
         }
 
         // Search videos
@@ -271,7 +337,7 @@
                     renderPagination();
                 }
             } catch (error) {
-                resultsDiv.innerHTML = `<div class="empty-state"><div class="empty-state-icon">❌</div><div class="empty-state-title">Search failed</div><p class="empty-state-text">${error.message}</p></div>`;
+                resultsDiv.innerHTML = `<div class="empty-state"><div class="empty-state-icon">❌</div><div class="empty-state-title">Search failed</div><p class="empty-state-text">${escapeHtml(error.message)}</p></div>`;
             }
         }
 
@@ -342,6 +408,7 @@
 
             renderSelectedList();
             updateSearchCards();
+            markUnsaved('staff-picks');
         }
 
         function updateSearchCards() {
@@ -362,9 +429,14 @@
 
         // Remove video from selection
         function removeVideo(id) {
+            const video = selectedVideos.find(v => v.id === id);
+            if (!video) return;
+            if (!confirm(`Remove "${video.title || video.id}" from Staff Picks?`)) return;
+
             selectedVideos = selectedVideos.filter(v => v.id !== id);
             renderSelectedList();
             updateSearchCards();
+            markUnsaved('staff-picks');
         }
 
         // Render selected videos list
@@ -382,24 +454,22 @@
             }
 
             listDiv.innerHTML = selectedVideos.map(video => `
-                <div class="selected-item" data-id="${video.id}" draggable="true">
+                <div class="selected-item" data-id="${escapeAttribute(video.id)}" draggable="true">
                     <div class="selected-item-drag">⋮⋮</div>
                     <div class="selected-item-thumb">
-                        <img src="https://archive.org/services/img/${video.id}" alt="${escapeHtml(video.title)}">
+                        <img src="https://archive.org/services/img/${encodeURIComponent(video.id)}" alt="${escapeAttribute(video.title)}">
                     </div>
                     <div class="selected-item-info">
                         <div class="selected-item-title">${escapeHtml(video.title)}</div>
-                        <div class="selected-item-id">${video.id}</div>
+                        <div class="selected-item-id">${escapeHtml(video.id)}</div>
                     </div>
-                    <button class="selected-item-remove" onclick="event.stopPropagation(); removeVideo('${video.id}')" title="Remove">
+                    <button type="button" class="selected-item-remove" title="Remove" aria-label="Remove ${escapeAttribute(video.title)}">
                         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M4 4l8 8M12 4l-8 8"/>
                         </svg>
                     </button>
                 </div>
             `).join('');
-
-            setupDragAndDrop();
         }
 
         // Save current panel
@@ -449,18 +519,24 @@
 
                 if (result.success) {
                     showToast('Staff picks saved successfully', 'success');
-                    clearUnsaved();
+                    setSaveStatus('staff-picks', `Staff picks saved at ${new Date().toLocaleTimeString()}`, 'success');
+                    clearUnsaved('staff-picks');
                     refreshPreview();
                 } else {
                     showToast(`Error: ${result.error || 'Unknown error'}`, 'error', 5000);
+                    setSaveStatus('staff-picks', `Save failed: ${result.error || 'Unknown error'}`, 'error');
                 }
             } catch (error) {
                 showToast(`Error: ${error.message}`, 'error', 5000);
+                setSaveStatus('staff-picks', `Save failed: ${error.message}`, 'error');
             }
         }
 
         // Save Site Settings
         async function saveSiteSettings() {
+            // Three panels share this endpoint; report inline on the one the
+            // save was started from.
+            const originPanel = ['site-settings', 'appearance', 'display'].includes(currentPanel) ? currentPanel : 'site-settings';
             const settings = {
                 siteName: document.getElementById('siteName')?.value || 'Archive Film Club',
                 tagline: document.getElementById('siteTagline')?.value || '',
@@ -497,13 +573,16 @@
 
                 if (result.success) {
                     showToast('Settings saved successfully', 'success');
-                    clearUnsaved();
+                    setSaveStatus(originPanel, `Settings saved at ${new Date().toLocaleTimeString()}`, 'success');
+                    clearUnsaved('site-settings', 'appearance', 'display');
                     refreshPreview();
                 } else {
                     showToast(`Error: ${result.error || 'Unknown error'}`, 'error', 5000);
+                    setSaveStatus(originPanel, `Save failed: ${result.error || 'Unknown error'}`, 'error');
                 }
             } catch (error) {
                 showToast(`Error: ${error.message}`, 'error', 5000);
+                setSaveStatus(originPanel, `Save failed: ${error.message}`, 'error');
             }
         }
 
@@ -532,18 +611,18 @@
             }
 
             container.innerHTML = featuredSections.map((section, index) => `
-                <div class="card" style="margin-bottom: 16px;" data-section-id="${section.id}">
+                <div class="card" style="margin-bottom: 16px;" data-section-id="${escapeAttribute(section.id)}">
                     <div class="card-header">
                         <div>
                             <h3 class="card-title">${escapeHtml(section.title)}</h3>
                             <p class="card-subtitle">${section.videos?.length || 0} videos &middot; ${section.enabled ? '<span style="color:var(--success)">Enabled</span>' : '<span style="color:var(--text-tertiary)">Disabled</span>'}</p>
                         </div>
                         <div style="display: flex; gap: 8px;">
-                            <button class="btn btn-secondary btn-sm" onclick="editSection('${section.id}')">
+                            <button class="btn btn-secondary btn-sm" onclick="editSection(${escapeJsArg(section.id)})">
                                 <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                                 Edit
                             </button>
-                            <button class="btn btn-danger btn-sm" onclick="deleteSection('${section.id}')">
+                            <button class="btn btn-danger btn-sm" onclick="deleteSection(${escapeJsArg(section.id)})">
                                 <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
                                 Delete
                             </button>
@@ -559,12 +638,17 @@
         }
 
         function addNewSection() {
+            // Discard any half-finished edit first (this also drops a previous
+            // unsaved "New Section" so a later save can't persist it).
+            if (currentEditingSection) cancelEditSection();
+
             const newSection = {
                 id: 'section-' + Date.now(),
                 title: 'New Section',
                 description: '',
                 enabled: true,
-                videos: []
+                videos: [],
+                _isNew: true // client-only: cleared on save, section dropped on cancel
             };
 
             featuredSections.push(newSection);
@@ -579,7 +663,7 @@
             currentEditingSection = sectionId;
 
             const container = document.getElementById('sectionsList');
-            const sectionCard = container.querySelector(`[data-section-id="${sectionId}"]`);
+            const sectionCard = container.querySelector(`[data-section-id="${CSS.escape(sectionId)}"]`);
             if (!sectionCard) return;
 
             sectionCard.innerHTML = `
@@ -614,33 +698,17 @@
                     <div style="margin-bottom: 16px;">
                         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
                             <label class="form-label" style="margin: 0;">Videos in this section</label>
-                            <button class="btn btn-primary btn-sm" onclick="openVideoSearchModal('${sectionId}')">
+                            <button class="btn btn-primary btn-sm" onclick="openVideoSearchModal(${escapeJsArg(sectionId)})">
                                 <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> Add Videos
                             </button>
                         </div>
                         <div id="sectionVideosList" class="selected-list" style="max-height: 300px;">
-                            ${section.videos?.length > 0 ? section.videos.map(video => `
-                                <div class="selected-item" data-video-id="${video.id}" draggable="true">
-                                    <div class="selected-item-drag">⋮⋮</div>
-                                    <div class="selected-item-thumb">
-                                        <img src="https://archive.org/services/img/${video.id}" alt="${escapeHtml(video.title)}">
-                                    </div>
-                                    <div class="selected-item-info">
-                                        <div class="selected-item-title">${escapeHtml(video.title)}</div>
-                                        <div class="selected-item-id">${video.id}</div>
-                                    </div>
-                                    <button class="selected-item-remove" onclick="removeVideoFromSection('${sectionId}', '${video.id}')" title="Remove">
-                                        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                                            <path d="M4 4l8 8M12 4l-8 8"/>
-                                        </svg>
-                                    </button>
-                                </div>
-                            `).join('') : '<div class="empty-state"><div class="empty-state-icon">🎬</div><div class="empty-state-title">No videos yet</div><p class="empty-state-text">Add videos to this section</p></div>'}
+                            ${renderSectionVideoItems(section)}
                         </div>
                     </div>
 
                     <div style="display: flex; gap: 12px; margin-top: 20px;">
-                        <button class="btn btn-success btn-sm" onclick="saveEditSection('${sectionId}')">
+                        <button class="btn btn-success btn-sm" onclick="saveEditSection(${escapeJsArg(sectionId)})">
                             <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
                             Save Section
                         </button>
@@ -650,32 +718,73 @@
                     </div>
                 </div>
             `;
-
-            setupSectionVideoDragAndDrop();
         }
 
+        // Markup for the videos inside the section editor. Shared by
+        // editSection(), removeVideoFromSection() and toggleVideoForSection().
+        function renderSectionVideoItems(section) {
+            const videos = section.videos || [];
+            if (!videos.length) {
+                return '<div class="empty-state"><div class="empty-state-icon">🎬</div><div class="empty-state-title">No videos yet</div><p class="empty-state-text">Add videos to this section</p></div>';
+            }
+            return videos.map(video => `
+                <div class="selected-item" data-video-id="${escapeAttribute(video.id)}" draggable="true">
+                    <div class="selected-item-drag">⋮⋮</div>
+                    <div class="selected-item-thumb">
+                        <img src="https://archive.org/services/img/${encodeURIComponent(video.id)}" alt="${escapeAttribute(video.title)}">
+                    </div>
+                    <div class="selected-item-info">
+                        <div class="selected-item-title">${escapeHtml(video.title)}</div>
+                        <div class="selected-item-id">${escapeHtml(video.id)}</div>
+                    </div>
+                    <button type="button" class="selected-item-remove" title="Remove" aria-label="Remove ${escapeAttribute(video.title)}">
+                        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M4 4l8 8M12 4l-8 8"/>
+                        </svg>
+                    </button>
+                </div>
+            `).join('');
+        }
+
+        // Drag and drop + remove-button clicks for the section editor's video
+        // list. #sectionVideosList is re-created on every render, so the
+        // listeners are delegated from the permanent #sectionsList container
+        // and bound exactly once (they used to be re-attached on every render,
+        // stacking handlers).
         function setupSectionVideoDragAndDrop() {
-            const list = document.getElementById('sectionVideosList');
-            if (!list) return;
+            const container = document.getElementById('sectionsList');
+            if (!container || container.dataset.listenersBound) return;
+            container.dataset.listenersBound = '1';
 
             let draggedItem = null;
+            const listOf = (e) => (e.target && e.target.closest) ? e.target.closest('#sectionVideosList') : null;
 
-            list.addEventListener('dragstart', (e) => {
-                if (e.target.classList.contains('selected-item')) {
+            container.addEventListener('click', (e) => {
+                const btn = e.target.closest('.selected-item-remove');
+                if (!btn || !listOf(e)) return;
+                e.stopPropagation();
+                const item = btn.closest('.selected-item');
+                if (item && currentEditingSection) removeVideoFromSection(currentEditingSection, item.dataset.videoId);
+            });
+
+            container.addEventListener('dragstart', (e) => {
+                if (listOf(e) && e.target.classList.contains('selected-item')) {
                     draggedItem = e.target;
                     e.target.classList.add('dragging');
                 }
             });
 
-            list.addEventListener('dragend', (e) => {
-                if (e.target.classList.contains('selected-item')) {
+            container.addEventListener('dragend', (e) => {
+                if (listOf(e) && e.target.classList.contains('selected-item')) {
                     e.target.classList.remove('dragging');
                     draggedItem = null;
                     updateSectionVideoOrder();
                 }
             });
 
-            list.addEventListener('dragover', (e) => {
+            container.addEventListener('dragover', (e) => {
+                const list = listOf(e);
+                if (!list) return;
                 e.preventDefault();
                 const afterElement = getDragAfterElement(list, e.clientY);
                 if (draggedItem) {
@@ -704,6 +813,7 @@
             });
 
             section.videos = newOrder;
+            markUnsaved('sections');
         }
 
         function saveEditSection(sectionId) {
@@ -724,6 +834,7 @@
             section.description = description;
             section.enabled = enabled;
             section.updated = new Date().toISOString();
+            delete section._isNew;
 
             currentEditingSection = null;
             renderFeaturedSections();
@@ -733,6 +844,13 @@
         }
 
         function cancelEditSection() {
+            // A section created via "Add Section" that was never saved is a
+            // phantom: drop it instead of leaving "New Section" behind for the
+            // next auto-save to persist.
+            const editing = featuredSections.find(s => s.id === currentEditingSection);
+            if (editing && editing._isNew) {
+                featuredSections = featuredSections.filter(s => s !== editing);
+            }
             currentEditingSection = null;
             renderFeaturedSections();
         }
@@ -757,33 +875,12 @@
             if (!section) return;
 
             section.videos = section.videos.filter(v => v.id !== videoId);
+            markUnsaved('sections');
 
             // Re-render the video list
             const videosList = document.getElementById('sectionVideosList');
             if (videosList) {
-                const video = section.videos;
-                if (section.videos.length === 0) {
-                    videosList.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🎬</div><div class="empty-state-title">No videos yet</div><p class="empty-state-text">Add videos to this section</p></div>';
-                } else {
-                    videosList.innerHTML = section.videos.map(video => `
-                        <div class="selected-item" data-video-id="${video.id}" draggable="true">
-                            <div class="selected-item-drag">⋮⋮</div>
-                            <div class="selected-item-thumb">
-                                <img src="https://archive.org/services/img/${video.id}" alt="${escapeHtml(video.title)}">
-                            </div>
-                            <div class="selected-item-info">
-                                <div class="selected-item-title">${escapeHtml(video.title)}</div>
-                                <div class="selected-item-id">${video.id}</div>
-                            </div>
-                            <button class="selected-item-remove" onclick="removeVideoFromSection('${sectionId}', '${video.id}')" title="Remove">
-                                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M4 4l8 8M12 4l-8 8"/>
-                                </svg>
-                            </button>
-                        </div>
-                    `).join('');
-                    setupSectionVideoDragAndDrop();
-                }
+                videosList.innerHTML = renderSectionVideoItems(section);
             }
         }
 
@@ -791,9 +888,14 @@
             const section = featuredSections.find(s => s.id === sectionId);
             if (!section) return;
 
+            modalLastFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
             // Create modal overlay
             const modal = document.createElement('div');
             modal.id = 'videoSearchModal';
+            modal.setAttribute('role', 'dialog');
+            modal.setAttribute('aria-modal', 'true');
+            modal.setAttribute('aria-labelledby', 'videoSearchModalTitle');
             modal.style.cssText = `
                 position: fixed;
                 inset: 0;
@@ -820,8 +922,8 @@
             modal.innerHTML = `
                 <div class="card" style="width: 100%; max-width: 900px; max-height: 90vh; overflow-y: auto; animation: modalSlideIn 0.25s ease;">
                     <div class="card-header">
-                        <h3 class="card-title">Add Videos to ${escapeHtml(section.title)}</h3>
-                        <button class="btn btn-ghost btn-sm" onclick="closeVideoSearchModal()">
+                        <h3 class="card-title" id="videoSearchModalTitle">Add Videos to ${escapeHtml(section.title)}</h3>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="closeVideoSearchModal()">
                             <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                             Close
                         </button>
@@ -835,7 +937,7 @@
                                 </svg>
                                 <input type="text" class="search-input" id="modalSearchInput" placeholder="Search movies, shows, documentaries...">
                             </div>
-                            <button class="btn btn-primary" onclick="searchVideosForSection('${sectionId}')">
+                            <button type="button" class="btn btn-primary" id="modalSearchBtn">
                                 Search
                             </button>
                         </div>
@@ -853,8 +955,11 @@
 
             document.body.appendChild(modal);
 
+            const searchInput = document.getElementById('modalSearchInput');
+            document.getElementById('modalSearchBtn').addEventListener('click', () => searchVideosForSection(sectionId));
+
             // Enter key to search
-            document.getElementById('modalSearchInput').addEventListener('keypress', (e) => {
+            searchInput.addEventListener('keypress', (e) => {
                 if (e.key === 'Enter') searchVideosForSection(sectionId);
             });
 
@@ -862,13 +967,51 @@
             modal.addEventListener('click', (e) => {
                 if (e.target === modal) closeVideoSearchModal();
             });
+
+            // Keep Tab / Shift+Tab cycling inside the dialog while it is open
+            // (aria-modal="true" promises this to assistive tech).
+            modalKeydownHandler = (e) => {
+                if (e.key === 'Tab') trapModalFocus(modal, e);
+            };
+            document.addEventListener('keydown', modalKeydownHandler);
+
+            // Move focus into the dialog
+            searchInput.focus();
+        }
+
+        function trapModalFocus(modal, e) {
+            const items = Array.from(modal.querySelectorAll(
+                'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+            )).filter(el => !el.disabled && el.offsetParent !== null);
+            if (!items.length) return;
+            const first = items[0];
+            const last = items[items.length - 1];
+            const active = document.activeElement;
+            if (e.shiftKey && (active === first || !modal.contains(active))) {
+                e.preventDefault();
+                last.focus();
+            } else if (!e.shiftKey && (active === last || !modal.contains(active))) {
+                e.preventDefault();
+                first.focus();
+            }
         }
 
         function closeVideoSearchModal() {
             const modal = document.getElementById('videoSearchModal');
-            if (modal) {
-                modal.remove();
+            if (!modal) return;
+            modal.remove();
+
+            if (modalKeydownHandler) {
+                document.removeEventListener('keydown', modalKeydownHandler);
+                modalKeydownHandler = null;
             }
+            modalSearch = { sectionId: null, page: 1, totalPages: 1 };
+
+            // Return focus to the control that opened the dialog (if still on page).
+            if (modalLastFocused && document.contains(modalLastFocused)) {
+                modalLastFocused.focus();
+            }
+            modalLastFocused = null;
         }
 
         async function searchVideosForSection(sectionId, page = 1) {
@@ -877,6 +1020,9 @@
 
             const query = document.getElementById('modalSearchInput').value.trim();
             if (!query) return;
+
+            modalSearch.sectionId = sectionId;
+            modalSearch.page = page;
 
             const resultsDiv = document.getElementById('modalSearchResults');
             resultsDiv.innerHTML = '<div class="loading"><div class="spinner"></div><p>Searching Archive.org...</p></div>';
@@ -900,10 +1046,43 @@
 
                 if (data.response && data.response.docs) {
                     renderModalResults(data.response.docs, sectionId);
+                    modalSearch.totalPages = Math.ceil((data.response.numFound || 0) / 24);
+                    renderModalPagination(sectionId);
+                    if (page > 1) resultsDiv.scrollIntoView({ block: 'start' });
                 }
             } catch (error) {
-                resultsDiv.innerHTML = `<div class="empty-state"><div class="empty-state-icon">❌</div><div class="empty-state-title">Search failed</div><p class="empty-state-text">${error.message}</p></div>`;
+                modalSearch.totalPages = 1;
+                renderModalPagination(sectionId);
+                resultsDiv.innerHTML = `<div class="empty-state"><div class="empty-state-icon">❌</div><div class="empty-state-title">Search failed</div><p class="empty-state-text">${escapeHtml(error.message)}</p></div>`;
             }
+        }
+
+        // Modal pagination: same pattern as renderPagination() for Staff
+        // Picks, but wired with listeners so the section id never travels
+        // through an inline handler string.
+        function renderModalPagination(sectionId) {
+            const paginationDiv = document.getElementById('modalPagination');
+            if (!paginationDiv) return;
+
+            if (modalSearch.totalPages <= 1) {
+                paginationDiv.style.display = 'none';
+                paginationDiv.innerHTML = '';
+                return;
+            }
+
+            const current = modalSearch.page;
+            const total = modalSearch.totalPages;
+            paginationDiv.style.display = 'flex';
+            paginationDiv.innerHTML = `
+                <button type="button" data-page="${current - 1}" ${current <= 1 ? 'disabled' : ''}>← Previous</button>
+                <button type="button" disabled style="opacity: 0.7;">Page ${current} of ${total}</button>
+                <button type="button" data-page="${current + 1}" ${current >= total ? 'disabled' : ''}>Next →</button>
+            `;
+            paginationDiv.querySelectorAll('button[data-page]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    searchVideosForSection(sectionId, parseInt(btn.dataset.page, 10) || 1);
+                });
+            });
         }
 
         function renderModalResults(docs, sectionId) {
@@ -957,6 +1136,7 @@
             } else {
                 section.videos.push({ id: videoId, title: title, creator: creator });
             }
+            markUnsaved('sections');
 
             // Update the modal view
             const cards = document.querySelectorAll('#modalSearchResults .video-card');
@@ -976,28 +1156,7 @@
             // Update the section videos list in the background
             const videosList = document.getElementById('sectionVideosList');
             if (videosList && currentEditingSection === sectionId) {
-                if (section.videos.length === 0) {
-                    videosList.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🎬</div><div class="empty-state-title">No videos yet</div><p class="empty-state-text">Add videos to this section</p></div>';
-                } else {
-                    videosList.innerHTML = section.videos.map(video => `
-                        <div class="selected-item" data-video-id="${video.id}" draggable="true">
-                            <div class="selected-item-drag">⋮⋮</div>
-                            <div class="selected-item-thumb">
-                                <img src="https://archive.org/services/img/${video.id}" alt="${escapeHtml(video.title)}">
-                            </div>
-                            <div class="selected-item-info">
-                                <div class="selected-item-title">${escapeHtml(video.title)}</div>
-                                <div class="selected-item-id">${video.id}</div>
-                            </div>
-                            <button class="selected-item-remove" onclick="removeVideoFromSection('${sectionId}', '${video.id}')" title="Remove">
-                                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M4 4l8 8M12 4l-8 8"/>
-                                </svg>
-                            </button>
-                        </div>
-                    `).join('');
-                    setupSectionVideoDragAndDrop();
-                }
+                videosList.innerHTML = renderSectionVideoItems(section);
             }
         }
 
@@ -1014,31 +1173,46 @@
                         if (m) h['X-CSRF-Token'] = m.getAttribute('content') || '';
                         return h;
                     })(),
-                    body: JSON.stringify({ sections: featuredSections })
+                    // Strip the client-only _isNew marker before persisting.
+                    body: JSON.stringify({ sections: featuredSections.map(({ _isNew, ...section }) => section) })
                 });
 
                 const result = await response.json();
 
                 if (result.success) {
                     showToast('Featured sections saved successfully', 'success');
-                    clearUnsaved();
+                    setSaveStatus('sections', `Sections saved at ${new Date().toLocaleTimeString()}`, 'success');
+                    clearUnsaved('sections');
                     refreshPreview();
                 } else {
                     showToast(`Error: ${result.error || 'Unknown error'}`, 'error', 5000);
+                    setSaveStatus('sections', `Save failed: ${result.error || 'Unknown error'}`, 'error');
                 }
             } catch (error) {
                 showToast(`Error: ${error.message}`, 'error', 5000);
+                setSaveStatus('sections', `Save failed: ${error.message}`, 'error');
             }
         }
 
-        // Escape HTML
+        // Escape for HTML text AND attribute contexts: & < > " ' are all
+        // encoded, so call sites inside alt="…", value="…" and data-* are safe
+        // too (mirrors escapeHtml() in admin-metrics.js).
         function escapeHtml(text) {
-            if (!text) return '';
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            if (text === null || text === undefined) return '';
+            return String(text).replace(/[&<>"']/g, (c) => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            })[c]);
         }
 
+        // Kept as an alias for existing call sites.
         function escapeAttribute(text) {
-            return escapeHtml(text).replace(/"/g, '&quot;');
+            return escapeHtml(text);
+        }
+
+        // A JS string argument inside an inline on*="…" handler: JSON.stringify
+        // quotes/escapes it for JavaScript, escapeHtml for the attribute. The
+        // HTML parser decodes the entities back before the handler runs, so it
+        // sees a well-formed string literal whatever the id contains.
+        function escapeJsArg(value) {
+            return escapeHtml(JSON.stringify(String(value === null || value === undefined ? '' : value)));
         }

@@ -21,6 +21,15 @@ try {
 }
 
 $initialTheme = ($site_settings['defaultTheme'] ?? 'dark') === 'system' ? 'dark' : $site_settings['defaultTheme'];
+
+// Brand colours go inside a <style> block where HTML escaping is no
+// protection; validate as hex (guarded in case bootstrap's helper is absent).
+$brandColor = function_exists('afc_css_color')
+    ? afc_css_color((string)($site_settings['brandColor'] ?? ''), '#ff0000')
+    : (string)($site_settings['brandColor'] ?? '#ff0000');
+$accentColor = function_exists('afc_css_color')
+    ? afc_css_color((string)($site_settings['accentColor'] ?? ''), '#065fd4')
+    : (string)($site_settings['accentColor'] ?? '#065fd4');
 $token = isset($_GET['token']) ? (string)$_GET['token'] : '';
 
 $state = 'missing'; // missing | success | failed
@@ -48,12 +57,12 @@ if ($token !== '') {
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto:wght@400;500;600;700&display=swap" rel="stylesheet">
 
-  <link rel="stylesheet" href="styles.css">
-  <link rel="stylesheet" href="auth-styles.css">
+  <link rel="stylesheet" href="<?= htmlspecialchars(asset_url('styles.css'), ENT_QUOTES) ?>">
+  <link rel="stylesheet" href="<?= htmlspecialchars(asset_url('auth-styles.css'), ENT_QUOTES) ?>">
   <style>
     :root {
-      --brand-color: <?= htmlspecialchars($site_settings['brandColor'], ENT_QUOTES) ?>;
-      --accent-color: <?= htmlspecialchars($site_settings['accentColor'], ENT_QUOTES) ?>;
+      --brand-color: <?= htmlspecialchars($brandColor, ENT_QUOTES) ?>;
+      --accent-color: <?= htmlspecialchars($accentColor, ENT_QUOTES) ?>;
     }
   </style>
   <script>

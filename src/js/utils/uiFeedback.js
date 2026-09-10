@@ -24,12 +24,16 @@ export class UIFeedback {
    * Show loading state
    */
   showLoading() {
-    const { loading, searchBtn } = this.elements;
+    const { loading, searchBtn, results } = this.elements;
 
     if (loading) {
       loading.hidden = false;
       loading.style.display = 'flex';
     }
+
+    // aria-busy tells assistive tech the grid is mid-update, so a screen
+    // reader doesn't announce a half-rendered or stale list.
+    if (results) results.setAttribute('aria-busy', 'true');
 
     if (searchBtn) {
       searchBtn.disabled = true;
@@ -44,12 +48,14 @@ export class UIFeedback {
    * Hide loading state
    */
   hideLoading() {
-    const { loading, searchBtn } = this.elements;
+    const { loading, searchBtn, results } = this.elements;
 
     if (loading) {
       loading.hidden = true;
       loading.style.display = 'none';
     }
+
+    if (results) results.removeAttribute('aria-busy');
 
     if (searchBtn) {
       searchBtn.disabled = false;

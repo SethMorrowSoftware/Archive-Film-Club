@@ -3,8 +3,13 @@
  * Manages multiple featured content sections on the homepage
  */
 
-import { escapeHtml, extractValue, formatRuntime, getThumbnailUrl } from '../utils/helpers.js';
+import { escapeHtml, extractValue, formatRuntime, getThumbnailUrl, mapWithConcurrency } from '../utils/helpers.js';
 import { ICONS } from '../utils/icons.js';
+
+// Cap on parallel archive.org metadata fallback fetches. Section configs
+// can list dozens of ids; firing them all at once trips archive.org rate
+// limits and starves the page's own requests.
+const FALLBACK_CONCURRENCY = 6;
 
 export class FeaturedSectionsManager {
   constructor(app) {
@@ -12,6 +17,17 @@ export class FeaturedSectionsManager {
     this.config = this.loadConfig();
     this.sections = [];
     this.container = document.getElementById('featuredSectionsContainer');
+
+    // One delegated listener for every Hide/Show button, wired once. The
+    // section id comes from a data attribute, never from an inline
+    // onclick string, so an admin-supplied id can't inject script.
+    if (this.container) {
+      this.container.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-section-toggle]');
+        if (!btn || !this.container.contains(btn)) return;
+        this.toggleSection(btn.dataset.sectionToggle);
+      });
+    }
   }
 
   loadConfig() {
@@ -134,17 +150,19 @@ export class FeaturedSectionsManager {
 
     const missing = ids.filter(id => !metadataMap[id]);
     if (missing.length > 0) {
-      const fallbacks = await Promise.all(missing.map(async (id) => {
+      const fallbacks = await mapWithConcurrency(missing, FALLBACK_CONCURRENCY, async (id) => {
         try {
-          const response = await fetch(`https://archive.org/metadata/${id}`);
+          const response = await fetch(`https://archive.org/metadata/${encodeURIComponent(id)}`);
           if (!response.ok) return [id, null];
           const data = await response.json();
           return [id, data?.metadata ? { ...data.metadata, identifier: id } : null];
         } catch {
           return [id, null];
         }
-      }));
-      for (const [id, meta] of fallbacks) {
+      });
+      for (const entry of fallbacks) {
+        if (!entry) continue;
+        const [id, meta] = entry;
         if (meta) metadataMap[id] = meta;
       }
     }
@@ -163,7 +181,7 @@ export class FeaturedSectionsManager {
 
     // Add scroll buttons and event listeners for each section
     this.sections.forEach((section, index) => {
-      const sectionEl = this.container.querySelector(`[data-section-id="${section.id}"]`);
+      const sectionEl = this.findSection(section.id);
       if (sectionEl) {
         const grid = sectionEl.querySelector('.featured-section-grid');
         if (grid) {
@@ -174,11 +192,23 @@ export class FeaturedSectionsManager {
     });
   }
 
-  createSection(section) {
-    const hideBtn = this.isHidden(section.id) ? 'Show' : 'Hide';
+  /** Locate a rendered section by id without building a selector from it. */
+  findSection(sectionId) {
+    if (!this.container) return null;
+    const wanted = String(sectionId);
+    return Array.from(this.container.querySelectorAll('[data-section-id]'))
+      .find(el => el.dataset.sectionId === wanted) || null;
+  }
 
+  createSection(section) {
+    const hidden = this.isHidden(section.id);
+    const safeId = escapeHtml(String(section.id));
+
+    // A hidden section collapses to just its header so the Show button
+    // stays reachable — display:none on the whole section used to take the
+    // toggle with it, so "Show" could never actually be clicked.
     return `
-      <section class="featured-section" data-section-id="${section.id}" ${this.isHidden(section.id) ? 'style="display: none;"' : ''}>
+      <section class="featured-section${hidden ? ' is-collapsed' : ''}" data-section-id="${safeId}">
         <div class="featured-section-header">
           <div>
             <h2 class="featured-section-title">
@@ -186,8 +216,10 @@ export class FeaturedSectionsManager {
             </h2>
             ${section.description ? `<p class="featured-section-description">${escapeHtml(section.description)}</p>` : ''}
           </div>
-          <button class="btn btn-ghost" onclick="toggleFeaturedSection('${section.id}')" aria-label="${hideBtn} section">
-            ${hideBtn}
+          <button type="button" class="btn btn-ghost" data-section-toggle="${safeId}"
+                  aria-expanded="${hidden ? 'false' : 'true'}"
+                  aria-label="${hidden ? 'Show' : 'Hide'} ${escapeHtml(section.title)} section">
+            ${hidden ? 'Show' : 'Hide'}
           </button>
         </div>
         <div class="featured-section-scroll-container">
@@ -204,22 +236,26 @@ export class FeaturedSectionsManager {
     const creator = extractValue(video.creator) || 'Unknown';
     const thumbUrl = getThumbnailUrl(video.identifier);
     const runtime = formatRuntime(video.runtime);
+    const playerUrl = `player.php?video=${encodeURIComponent(video.identifier)}`;
 
+    // The title is a real link so the card is keyboard-operable and
+    // middle-click / "open in new tab" work. The card-level click handler
+    // ignores clicks that land on the link and lets the browser navigate.
     return `
-      <article class="featured-card" data-identifier="${video.identifier}">
+      <article class="featured-card" data-identifier="${escapeHtml(video.identifier)}">
         <div class="featured-card-thumb">
           <img src="${thumbUrl}"
                alt="${escapeHtml(title)}"
                loading="lazy"
                decoding="async"
-               onerror="this.style.display='none'; this.parentNode.innerHTML='<div class=thumb-placeholder>🎬</div>'"/>
+               onerror="this.style.display='none';this.parentNode.classList.add('thumb-missing')"/>
           ${runtime ? `<span class="runtime-badge">${runtime}</span>` : ''}
           <div class="featured-card-overlay">
             <span class="play-btn">${ICONS.play}</span>
           </div>
         </div>
         <div class="featured-card-content">
-          <h3 class="featured-card-title">${escapeHtml(title)}</h3>
+          <h3 class="featured-card-title"><a class="card-link" href="${playerUrl}">${escapeHtml(title)}</a></h3>
           <p class="featured-card-creator">${escapeHtml(creator)}</p>
           ${video.adminNote ? `<span class="featured-card-note">${ICONS.star} ${escapeHtml(video.adminNote)}</span>` : ''}
         </div>
@@ -287,30 +323,30 @@ export class FeaturedSectionsManager {
   }
 
   toggleSection(sectionId) {
-    const section = this.container.querySelector(`[data-section-id="${sectionId}"]`);
+    const section = this.findSection(sectionId);
     if (!section) return;
 
-    const isCurrentlyHidden = section.style.display === 'none';
+    const nowHidden = !section.classList.contains('is-collapsed');
+    section.classList.toggle('is-collapsed', nowHidden);
 
-    if (isCurrentlyHidden) {
-      section.style.display = '';
-      try {
-        localStorage.removeItem(`hideFeaturedSection_${sectionId}`);
-      } catch (e) {}
-    } else {
-      section.style.display = 'none';
-      try {
+    try {
+      if (nowHidden) {
         localStorage.setItem(`hideFeaturedSection_${sectionId}`, 'true');
-      } catch (e) {}
+      } else {
+        localStorage.removeItem(`hideFeaturedSection_${sectionId}`);
+      }
+    } catch (e) {}
+
+    // Keep the button's label in step with the state it now represents.
+    const btn = section.querySelector('[data-section-toggle]');
+    if (btn) {
+      const titleEl = section.querySelector('.featured-section-title');
+      const title = titleEl ? titleEl.textContent.trim() : '';
+      btn.textContent = nowHidden ? 'Show' : 'Hide';
+      btn.setAttribute('aria-expanded', nowHidden ? 'false' : 'true');
+      btn.setAttribute('aria-label', `${nowHidden ? 'Show' : 'Hide'} ${title} section`.replace(/\s+/g, ' '));
     }
   }
 }
-
-// Make toggle function available globally
-window.toggleFeaturedSection = function(sectionId) {
-  if (window.featuredSectionsManager) {
-    window.featuredSectionsManager.toggleSection(sectionId);
-  }
-};
 
 export default FeaturedSectionsManager;

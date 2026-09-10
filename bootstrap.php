@@ -42,7 +42,20 @@ if (file_exists($envFile)) {
 
         list($key, $value) = explode('=', $line, 2);
         $key = trim($key);
-        $value = trim(trim($value), "\"'");
+        $value = trim($value);
+
+        // Quoted values. install.php writes any value containing whitespace,
+        // '#' or a quote as a double-quoted string with `\` and `"` escaped
+        // (so a DB password like  pa"ss\word  round-trips); undo exactly
+        // those two escapes. Single-quoted values are literal. Anything else
+        // is taken verbatim. (Keep in sync with db/config.php, which has its
+        // own copy of this loader for entrypoints that skip bootstrap.)
+        $len = strlen($value);
+        if ($len >= 2 && $value[0] === '"' && $value[$len - 1] === '"') {
+            $value = preg_replace('/\\\\([\\\\"])/', '$1', substr($value, 1, -1));
+        } elseif ($len >= 2 && $value[0] === "'" && $value[$len - 1] === "'") {
+            $value = substr($value, 1, -1);
+        }
 
         if ($key !== '' && getenv($key) === false) {
             putenv("$key=$value");
@@ -292,6 +305,18 @@ function env(string $key, $default = null) {
 function base_path(string $relative = ''): string {
     $relative = ltrim($relative, '/');
     return ARCHIVE_FILM_CLUB_ROOT . ($relative === '' ? '' : '/' . $relative);
+}
+
+/**
+ * Render-time guard for a CSS color that ends up inside an inline
+ * <style> / meta tag (brand + accent color). Only a hex color is allowed
+ * through — #rgb, #rgba, #rrggbb, #rrggbbaa — anything else (a stray
+ * `;`, `url(`, an expression, an empty string) collapses to $fallback.
+ * htmlspecialchars() alone doesn't help inside a <style> block, which is
+ * why the page templates call this in addition to escaping.
+ */
+function afc_css_color(string $value, string $fallback): string {
+    return preg_match('/^#[0-9a-f]{3,8}$/i', $value) ? $value : $fallback;
 }
 
 /**

@@ -676,6 +676,19 @@ class ArchiveOrgService {
      * Make HTTP GET request (tries cURL first, then file_get_contents)
      */
     private function httpGet(string $url): array {
+        return self::fetchUrl($url);
+    }
+
+    /**
+     * Shared outbound GET: cURL first (works on allow_url_fopen=Off hosts),
+     * file_get_contents fallback, both capped at MAX_RESPONSE_BYTES. Static
+     * so LocalStorageService (and any other caller) can reuse it without
+     * constructing this service — which would drag in the cache layer and a
+     * settings read just to make one HTTP call.
+     *
+     * Returns ['success' => bool, 'data' => string] or ['success' => false, 'error' => string].
+     */
+    public static function fetchUrl(string $url): array {
         $data = null;
         $status = 0;
 

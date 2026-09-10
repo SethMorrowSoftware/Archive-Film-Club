@@ -184,6 +184,18 @@
 
         .btn:active { transform: scale(0.97); }
 
+        /* Keyboard focus: a clear ring for anything that only had a hover
+           state (or outline:none) before. :focus-visible keeps it off mouse
+           clicks. */
+        .btn:focus-visible,
+        .nav-item:focus-visible,
+        .filter-tab:focus-visible,
+        .pagination button:focus-visible,
+        .selected-item-remove:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+
         .btn-primary {
             background: var(--accent);
             color: white;
@@ -564,6 +576,7 @@
             padding: 20px 24px;
             border-bottom: 1px solid var(--border-color);
             display: flex;
+            flex-wrap: wrap;
             align-items: center;
             justify-content: space-between;
             gap: 16px;
@@ -1007,6 +1020,7 @@
         .form-select:focus {
             outline: none;
             border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-glow);
         }
 
         /* Save Status */
@@ -1614,7 +1628,11 @@
            ADMIN TABLE (users, etc.)
            ===================================================== */
         .admin-table-wrap {
-            overflow-x: auto;
+            /* The wrap is the table's scroll container in both axes (long
+               user lists scroll here, not the page), which is what lets the
+               sticky <th> below actually stick. */
+            overflow: auto;
+            max-height: 70vh;
         }
         .admin-table {
             width: 100%;
@@ -1632,9 +1650,10 @@
             border-bottom: 1px solid var(--border-color);
             background: var(--bg-secondary);
             position: sticky;
-            /* Sit below the 60px sticky .admin-header so column headings
-               don't slide behind the chrome on scroll. */
-            top: 60px;
+            /* Sticks to the top edge of .admin-table-wrap (its scroll
+               container), so the offset is 0 -- a page-relative offset for
+               the 60px .admin-header would be inert here. */
+            top: 0;
             z-index: 1;
         }
         .admin-table thead th.num,
@@ -1927,6 +1946,7 @@
            ===================================================== */
         .comments-mod-filters {
             display: flex;
+            flex-wrap: wrap;
             gap: 4px;
             background: var(--bg-tertiary);
             padding: 4px;
@@ -2123,7 +2143,7 @@
             background: var(--bg-tertiary); border: 1px solid var(--border-color);
             border-radius: var(--radius-md); color: var(--text-primary); font-size: 14px;
         }
-        .maint-input:focus { outline: none; border-color: var(--accent); }
+        .maint-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
         .maint-restore-fields { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
         .maint-restore-fields input[type="file"] { padding: 8px 12px; cursor: pointer; }
         .maint-restore-skip { padding: 0; }

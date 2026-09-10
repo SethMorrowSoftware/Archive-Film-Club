@@ -56,6 +56,11 @@ export class VideoProgressTracker {
       // supplied a fresher copy.
       title: (meta && meta.title) || previous.title || null,
       creator: (meta && meta.creator) || previous.creator || null,
+      // Zero-based episode index for multi-part items (null for single
+      // videos) so the player can resume the right part of a series.
+      track: meta && Number.isInteger(meta.track)
+        ? meta.track
+        : (Number.isInteger(previous.track) ? previous.track : null),
     };
 
     try {

@@ -2,11 +2,17 @@
  * BookmarkManager Service
  *
  * Manages the user's bookmarked videos with a write-through localStorage
- * cache and optional backend sync.
+ * cache and backend sync.
  *
- *  - Unauthenticated (guest) users: localStorage is the source of truth.
- *  - Authenticated users: backend is the source of truth, localStorage is
- *    a mirror used for instant reads and offline fallback.
+ *  - The backend is the source of truth for guests AND signed-in users:
+ *    api/bookmarks.php resolves the current guest (cookie) or account, and
+ *    UserAuthService::mergeGuest() folds guest rows into the account on
+ *    login/signup. Gating writes on isAuthenticated() used to mean guest
+ *    bookmarks never reached the server, so there was nothing to merge.
+ *  - localStorage is a mirror for instant reads and offline fallback. On
+ *    pull we MERGE (local entries the server lacks get pushed up) rather
+ *    than replace, and the mirror is cleared on logout so the next person
+ *    on this browser doesn't inherit the previous user's list.
  *
  * The public API stays synchronous so the existing call sites in app.js
  * don't need to await every interaction. Network writes are fire-and-forget.
@@ -24,11 +30,29 @@ export class BookmarkManager {
     this.bookmarks = safeParseJSON(localStorage.getItem(STORAGE_KEY)) || [];
     this._syncInFlight = false;
     this._listeners = new Set();
+    // Whether the previous auth notification carried a user, so we can
+    // tell a real logout (user → null) from the initial "not fetched yet".
+    this._hadUser = false;
 
     // Whenever the auth state changes, pull the server-side list.
     // This also runs once synchronously with the current state.
-    AuthService.onChange(({ user }) => {
+    AuthService.onChange(({ user, guest }) => {
       if (user) {
+        this._hadUser = true;
+        this._pullFromServer();
+        return;
+      }
+      if (this._hadUser) {
+        // Logout: drop the previous account's mirror.
+        this._hadUser = false;
+        this.bookmarks = [];
+        this._persist();
+        this._emit();
+        return;
+      }
+      // Guest with a confirmed server identity — sync with the guest row
+      // so bookmarks made on another tab/session of this guest show up.
+      if (guest) {
         this._pullFromServer();
       }
     });
@@ -81,15 +105,9 @@ export class BookmarkManager {
     this._persist();
     this._emit();
 
-    // Fire-and-forget server write when logged in.
-    if (AuthService.isAuthenticated()) {
-      ApiService.addBookmark({
-        id: bookmark.id,
-        title: bookmark.title,
-        creator: bookmark.creator,
-        thumbnail: bookmark.thumbnail,
-      }).catch(err => console.warn('[BookmarkManager] add sync failed:', err));
-    }
+    // Fire-and-forget server write. Guests are resolved server-side via
+    // their cookie, so this is safe (and necessary) when signed out too.
+    this._pushOne(bookmark);
 
     return true;
   }
@@ -102,10 +120,8 @@ export class BookmarkManager {
     this._persist();
     this._emit();
 
-    if (AuthService.isAuthenticated()) {
-      ApiService.removeBookmark(id)
-        .catch(err => console.warn('[BookmarkManager] remove sync failed:', err));
-    }
+    ApiService.removeBookmark(id)
+      .catch(err => console.warn('[BookmarkManager] remove sync failed:', err));
   }
 
   clear() {
@@ -113,10 +129,8 @@ export class BookmarkManager {
     this._persist();
     this._emit();
 
-    if (AuthService.isAuthenticated()) {
-      ApiService.syncBookmarks([])
-        .catch(err => console.warn('[BookmarkManager] clear sync failed:', err));
-    }
+    ApiService.syncBookmarks([])
+      .catch(err => console.warn('[BookmarkManager] clear sync failed:', err));
   }
 
   // ----- Internals ------------------------------------------------------
@@ -128,11 +142,23 @@ export class BookmarkManager {
     }
   }
 
+  _pushOne(bookmark) {
+    ApiService.addBookmark({
+      id: bookmark.id,
+      title: bookmark.title,
+      creator: bookmark.creator,
+      thumbnail: bookmark.thumbnail,
+    }).catch(err => console.warn('[BookmarkManager] add sync failed:', err));
+  }
+
   /**
-   * Pull the authoritative bookmark list from the server. Used right after
-   * login and on first authenticated page load. The server already holds
-   * the merged guest→account data thanks to UserAuthService::mergeGuest(),
-   * so we just replace our local mirror with whatever comes back.
+   * Pull the bookmark list from the server and merge it with the local
+   * mirror. Used right after login, on first page load, and for guests
+   * once me.php has confirmed their identity.
+   *
+   * Anything local that the server doesn't have (a write that failed
+   * offline, or a guest bookmark from before the API round-trip landed)
+   * is kept and pushed up, rather than silently dropped.
    */
   async _pullFromServer() {
     if (this._syncInFlight) return;
@@ -143,7 +169,7 @@ export class BookmarkManager {
 
       // Normalize to our local shape. BookmarkService returns
       // {id, title, creator, thumbnail, created_at}.
-      this.bookmarks = list.map(row => ({
+      const serverList = list.map(row => ({
         id: row.id,
         title: row.title || '',
         creator: row.creator || '',
@@ -151,8 +177,19 @@ export class BookmarkManager {
         timestamp: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
       }));
 
+      const serverIds = new Set(serverList.map(b => b.id));
+      const localOnly = this.bookmarks.filter(b => b && b.id && !serverIds.has(b.id));
+
+      // Local-only entries are the newest (they were added on this device
+      // most recently), so they lead; the server list keeps its own order.
+      this.bookmarks = [...localOnly, ...serverList].slice(0, CONFIG.MAX_BOOKMARKS);
+
       this._persist();
       this._emit();
+
+      for (const bookmark of localOnly) {
+        this._pushOne(bookmark);
+      }
     } catch (e) {
       console.warn('[BookmarkManager] server pull failed:', e);
     } finally {

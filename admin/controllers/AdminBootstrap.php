@@ -43,8 +43,18 @@ try {
 
         // Consider the DB usable whenever an admin exists in either the
         // unified users table (migration 003) or the legacy admin_users
-        // table. hasAdminUsers() on its own only checks the legacy table.
-        if ($authService->hasAdminUsers()) {
+        // table. hasAdminUsers() on its own only checks the legacy table —
+        // and that table is dropped by migration 005, so the call throws on
+        // any up-to-date install. Catch it HERE (not in the outer catch,
+        // which would abandon the whole block and push a perfectly healthy
+        // DB into JSON-fallback mode) and fall through to the unified check.
+        $legacyAdmins = false;
+        try {
+            $legacyAdmins = $authService->hasAdminUsers();
+        } catch (Throwable $e) {
+            // admin_users missing — expected once migration 005 has run.
+        }
+        if ($legacyAdmins) {
             $useDatabase = true;
         } else {
             try {
@@ -73,6 +83,98 @@ $ADMIN_PASSWORD_HASH = getenv('ADMIN_PASSWORD') ?: null;
 $adminPasswordIsHashed = $ADMIN_PASSWORD_HASH
     && (strncmp($ADMIN_PASSWORD_HASH, '$2y$', 4) === 0
         || strncmp($ADMIN_PASSWORD_HASH, '$argon2', 7) === 0);
+
+/**
+ * Break-glass login throttle — file-backed and DB-independent, because the
+ * whole point of the ADMIN_PASSWORD path is that the database may be down
+ * (so the auth_attempts table AdminAuthService throttles on is unusable).
+ *
+ * Semantics mirror AdminAuthService::isLoginThrottled() per IP, with a hard
+ * lockout: 5 failures inside 15 minutes lock that IP out for 15 minutes.
+ * State is a small JSON map {ipHash: {fails, first, locked_until}} under
+ * logs/ (auto-created by bootstrap.php, 404'd by the root .htaccess), falling
+ * back to the system temp dir when logs/ isn't writable. flock() serializes
+ * concurrent updates. If no writable location exists at all we fail OPEN
+ * (and log it) — the same choice the DB throttle makes when its table is
+ * missing — rather than lock the operator out of their own recovery path.
+ *
+ *   afc_break_glass_throttle('check') → true when this IP is locked out
+ *   afc_break_glass_throttle('fail')  → record one failure; true if it tripped the lockout
+ *   afc_break_glass_throttle('reset') → clear this IP after a successful login
+ */
+if (!function_exists('afc_break_glass_throttle')) {
+    function afc_break_glass_throttle(string $op): bool {
+        $maxFails = 5;
+        $lockSeconds = 900;    // 15 min lockout
+        $windowSeconds = 900;  // failures older than this no longer count
+
+        $root = dirname(__DIR__, 2);
+        $logsDir = $root . '/logs';
+        $file = (is_dir($logsDir) && is_writable($logsDir))
+            ? $logsDir . '/break-glass-throttle.json'
+            : rtrim(sys_get_temp_dir(), '/\\') . '/afc-break-glass-' . md5($root) . '.json';
+
+        $ipKey = hash('sha256', $_SERVER['REMOTE_ADDR'] ?? 'unknown');
+        $now = time();
+
+        $fh = @fopen($file, 'c+');
+        if (!$fh || !@flock($fh, LOCK_EX)) {
+            if ($fh) {
+                fclose($fh);
+            }
+            error_log('[AdminBootstrap] break-glass throttle state unavailable (' . $file . '); failing open');
+            return false;
+        }
+
+        $map = json_decode((string)stream_get_contents($fh), true);
+        if (!is_array($map)) {
+            $map = [];
+        }
+        // Prune entries whose lockout AND failure window have both lapsed.
+        foreach ($map as $k => $v) {
+            if (!is_array($v)
+                || max((int)($v['locked_until'] ?? 0), (int)($v['first'] ?? 0) + $windowSeconds) < $now) {
+                unset($map[$k]);
+            }
+        }
+        $entry = isset($map[$ipKey]) && is_array($map[$ipKey])
+            ? $map[$ipKey]
+            : ['fails' => 0, 'first' => $now, 'locked_until' => 0];
+
+        $result = false;
+        switch ($op) {
+            case 'check':
+                $result = (int)($entry['locked_until'] ?? 0) > $now;
+                break;
+            case 'fail':
+                if ((int)($entry['first'] ?? 0) + $windowSeconds < $now) {
+                    $entry = ['fails' => 0, 'first' => $now, 'locked_until' => 0];
+                }
+                $entry['fails'] = (int)($entry['fails'] ?? 0) + 1;
+                if ($entry['fails'] >= $maxFails) {
+                    $entry['locked_until'] = $now + $lockSeconds;
+                    $entry['fails'] = 0;
+                    $entry['first'] = $now;
+                    $result = true;
+                }
+                $map[$ipKey] = $entry;
+                break;
+            case 'reset':
+                unset($map[$ipKey]);
+                break;
+        }
+
+        if ($op !== 'check') {
+            rewind($fh);
+            ftruncate($fh, 0);
+            fwrite($fh, json_encode($map));
+            fflush($fh);
+        }
+        flock($fh, LOCK_UN);
+        fclose($fh);
+        return $result;
+    }
+}
 
 // Break-glass password vs real DB admin — flag for dashboard banner.
 // If the install has a proper DB admin AND an ADMIN_PASSWORD is still set
@@ -116,11 +218,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
             // outright and surface the problem -- this prevents both the
             // plaintext-disclosure risk and the false sense of security.
             $login_error = 'ADMIN_PASSWORD in .env must be a password_hash() value, not plaintext. Generate one with: php -r "echo password_hash(\'yourpassword\', PASSWORD_DEFAULT);"';
+        } elseif (afc_break_glass_throttle('check')) {
+            // Checked BEFORE password_verify so a locked-out client can't
+            // keep pumping load through the hash function either.
+            $login_error = 'Too many sign-in attempts. Please wait a few minutes and try again.';
         } elseif (password_verify($supplied, $ADMIN_PASSWORD_HASH)) {
+            afc_break_glass_throttle('reset');
             session_regenerate_id(true);
             $_SESSION['admin_logged_in'] = true;
             $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
         } else {
+            afc_break_glass_throttle('fail');
             $login_error = 'Invalid password';
         }
     }

@@ -9,6 +9,9 @@
 require_once __DIR__ . '/../cache/CacheManager.php';
 require_once __DIR__ . '/../cache/ThumbnailCache.php';
 require_once __DIR__ . '/../db/Database.php';
+// For ArchiveOrgService::fetchUrl() — explicit require because the cron
+// scripts load this file directly, without bootstrap.php's autoloader.
+require_once __DIR__ . '/ArchiveOrgService.php';
 
 class LocalStorageService {
     private $cacheManager;
@@ -346,47 +349,14 @@ class LocalStorageService {
     }
 
     /**
-     * Make HTTP GET request
+     * Make HTTP GET request.
+     *
+     * Delegates to the one hardened fetch path (cURL-first so it works on
+     * allow_url_fopen=Off hosts, response size capped). This used to be a
+     * file_get_contents-only duplicate with no size cap, so the background
+     * queue silently failed on exactly the shared hosts it was built for.
      */
     private function httpGet(string $url): array {
-        $context = stream_context_create([
-            'http' => [
-                'timeout' => self::API_TIMEOUT,
-                'user_agent' => self::USER_AGENT,
-                'ignore_errors' => true,
-            ],
-            'ssl' => [
-                'verify_peer' => true,
-                'verify_peer_name' => true,
-            ],
-        ]);
-
-        $data = @file_get_contents($url, false, $context);
-
-        if ($data === false) {
-            return [
-                'success' => false,
-                'error' => 'Network request failed',
-            ];
-        }
-
-        // Check HTTP status
-        $status = 200;
-        if (isset($http_response_header[0])) {
-            preg_match('/HTTP\/[\d.]+\s+(\d+)/', $http_response_header[0], $matches);
-            $status = (int)($matches[1] ?? 200);
-        }
-
-        if ($status >= 400) {
-            return [
-                'success' => false,
-                'error' => "HTTP error: $status",
-            ];
-        }
-
-        return [
-            'success' => true,
-            'data' => $data,
-        ];
+        return ArchiveOrgService::fetchUrl($url);
     }
 }

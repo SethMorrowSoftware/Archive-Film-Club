@@ -160,6 +160,19 @@ class VideoPlayer {
     // Keyboard
     document.addEventListener('keydown', (e) => this.handleKeyboard(e));
 
+    // After a MOUSE click on one of the player's own buttons, drop focus
+    // from it. Otherwise the button keeps focus, Space re-activates it
+    // (e.g. "Next episode" fires again) instead of pausing, and the arrow
+    // keys never reach the video shortcuts. Keyboard activation (detail=0)
+    // keeps focus so Tab navigation is unaffected.
+    document.addEventListener('click', (e) => {
+      if (!e.detail) return;
+      const btn = e.target && e.target.closest
+        ? e.target.closest('.pctl-btn, .sidebar-nav-btn, .player-pill-btn, .player-action-btn, .up-next-btn, .density-btn, .resume-btn, .resume-dismiss, .playlist-item')
+        : null;
+      if (btn && typeof btn.blur === 'function') btn.blur();
+    });
+
     // Popstate
     window.addEventListener('popstate', () => this.parseUrlAndLoad());
 
@@ -273,10 +286,116 @@ class VideoPlayer {
   _currentVideoMeta() {
     const meta = this.metadata && (this.metadata.metadata || this.metadata);
     if (!meta) return null;
-    return {
+    const out = {
       title: extractValue(meta.title) || null,
       creator: extractValue(meta.creator) || null,
     };
+    // Remember which part of a series is playing so the next visit (and
+    // the homepage's Continue Watching row) can resume the right episode.
+    if (this.playlistService.getPlaylist()) {
+      out.track = this.playlistService.getCurrentIndex();
+    }
+    return out;
+  }
+
+  // ========================================
+  // Resume / seek helpers
+  // ========================================
+
+  /**
+   * Seek to `seconds` as soon as the CURRENT source knows its duration.
+   * The <video> element is reused across episodes, so a token guards
+   * against a stale listener seeking the *next* source if the user
+   * changes track before this one's metadata arrives.
+   */
+  _seekWhenReady(video, seconds) {
+    if (!video || !Number.isFinite(seconds) || seconds < 0) return;
+    const token = (this._seekToken = {});
+    const apply = () => {
+      if (this._seekToken !== token) return;
+      const dur = video.duration;
+      const upper = Number.isFinite(dur) && dur > 0 ? Math.max(0, dur - 1) : Infinity;
+      try { video.currentTime = Math.min(seconds, upper); } catch (e) { /* not seekable yet */ }
+    };
+    if (video.readyState >= 1) apply();
+    else video.addEventListener('loadedmetadata', apply, { once: true });
+  }
+
+  /** A saved position worth offering: past the intro, not at the end. */
+  _isResumable(progress) {
+    if (!progress || !progress.duration) return false;
+    const t = Number(progress.currentTime) || 0;
+    const pct = progress.percentage != null
+      ? Number(progress.percentage)
+      : (t / Number(progress.duration)) * 100;
+    return t > 10 && pct < 95;
+  }
+
+  /** Single-video resume from the item-level tracker (local, then server). */
+  _offerResume(video) {
+    const show = (progress) => {
+      if (!this._isResumable(progress)) return;
+      // Don't interrupt a viewer who already scrubbed somewhere.
+      if (video.currentTime > 10) return;
+      this.ui.showResumePrompt(formatTime(progress.currentTime), () => {
+        this._seekWhenReady(video, progress.currentTime);
+      });
+    };
+    show(this.progressTracker.getProgress(this.videoId));
+    // Signed-in viewers may have progress from another device; the server
+    // copy arrives asynchronously and only re-prompts when it's newer.
+    const id = this.videoId;
+    this.progressTracker.fetchProgress(id).then((remote) => {
+      if (id !== this.videoId || !remote) return;
+      const local = this.progressTracker.getProgress(id);
+      if (!local || Math.abs((remote.currentTime || 0) - (local.currentTime || 0)) > 5) show(remote);
+    }).catch(() => {});
+  }
+
+  /** Per-episode resume from the playlist's own progress store. */
+  _offerTrackResume(video, index) {
+    const progress = this.playlist.getTrackProgress(index);
+    if (!progress || progress.watched || !this._isResumable(progress)) return;
+    this.ui.showResumePrompt(formatTime(progress.currentTime), () => {
+      this._seekWhenReady(video, progress.currentTime);
+    });
+  }
+
+  // ========================================
+  // Media Session (lock screen / hardware keys / OS media overlay)
+  // ========================================
+
+  _updateMediaSession(title, creator) {
+    if (!('mediaSession' in navigator)) return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: title || this.videoId || '',
+        artist: creator || '',
+        album: this.siteSettings.siteName || 'Archive Film Club',
+        artwork: this.videoId
+          ? [{ src: `https://archive.org/services/img/${this.videoId}`, type: 'image/jpeg' }]
+          : [],
+      });
+    } catch (e) { /* older browsers */ }
+    this._setupMediaSessionHandlers();
+  }
+
+  _setupMediaSessionHandlers() {
+    if (!('mediaSession' in navigator) || this._mediaSessionWired) return;
+    this._mediaSessionWired = true;
+    const video = () => this.videoWrapper?.querySelector('video');
+    const handlers = {
+      play: () => { const v = video(); if (v) v.play().catch(() => {}); },
+      pause: () => { const v = video(); if (v) v.pause(); },
+      seekbackward: (d) => this._seekBy(video(), -((d && d.seekOffset) || 10)),
+      seekforward: (d) => this._seekBy(video(), (d && d.seekOffset) || 10),
+      seekto: (d) => { const v = video(); if (v && d && Number.isFinite(d.seekTime)) v.currentTime = d.seekTime; },
+      previoustrack: () => this.playPreviousEpisode(),
+      nexttrack: () => this.playNextEpisode(),
+    };
+    for (const action of Object.keys(handlers)) {
+      try { navigator.mediaSession.setActionHandler(action, handlers[action]); } catch (e) { /* unsupported action */ }
+    }
   }
 
   async togglePictureInPicture() {
@@ -459,125 +578,133 @@ class VideoPlayer {
   // ========================================
 
   handleKeyboard(e) {
+    // Returns true when the key was consumed (and preventDefault() called),
+    // so the <video> capture listener can stop native controls from acting
+    // on the same key. Returns false to let the browser handle it.
+
     // Global shortcuts that should fire regardless of focus target.
     if (e.key === 'Escape' && this.shortcutsHelp && !this.shortcutsHelp.hidden) {
       e.preventDefault();
       this._hideShortcutsHelp();
-      return;
-    }
-    if (e.key === '?') {
-      // Only intercept when not typing into a text input.
-      const tag = e.target.tagName;
-      if (tag !== 'INPUT' && tag !== 'TEXTAREA') {
-        e.preventDefault();
-        this._toggleShortcutsHelp();
-        return;
-      }
+      return true;
     }
 
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'BUTTON') return;
+    const target = e.target || {};
+    const tag = target.tagName;
+    const typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
+
+    if (e.key === '?' && !typing) {
+      e.preventDefault();
+      this._toggleShortcutsHelp();
+      return true;
+    }
+
+    if (typing || tag === 'BUTTON') return false;
+    // Never hijack browser/OS chords (Ctrl+F find, Cmd+L, Alt+Left…).
+    if (e.ctrlKey || e.metaKey || e.altKey) return false;
 
     const video = this.videoWrapper?.querySelector('video');
+    const playIcon = '<svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M5 3L19 12L5 21V3Z"/></svg>';
+    const pauseIcon = '<svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M6 4H10V20H6V4ZM14 4H18V20H14V4Z"/></svg>';
 
     switch (e.key) {
       case ' ':
       case 'k':
-        if (!video) return;
+        if (!video) return false;
         e.preventDefault();
         if (video.paused) {
-          video.play();
-          this.ui.showShortcutIndicator('Play', '<svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M5 3L19 12L5 21V3Z"/></svg>');
+          video.play().catch(() => {});
+          this.ui.showShortcutIndicator('Play', playIcon);
         } else {
           video.pause();
-          this.ui.showShortcutIndicator('Pause', '<svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M6 4H10V20H6V4ZM14 4H18V20H14V4Z"/></svg>');
+          this.ui.showShortcutIndicator('Pause', pauseIcon);
         }
-        break;
+        return true;
       case 'f':
         e.preventDefault();
         this.toggleFullscreen();
-        break;
+        return true;
       case 'm':
-        if (!video) return;
+        if (!video) return false;
         e.preventDefault();
         video.muted = !video.muted;
         this.ui.showShortcutIndicator(video.muted ? 'Muted' : 'Unmuted');
-        break;
+        return true;
       case 't':
         e.preventDefault();
         this.ui.toggleTheaterMode();
-        break;
+        return true;
       case 'ArrowLeft':
-        if (!video) return;
+        if (!video) return false;
         e.preventDefault();
         this._seekBy(video, -5);
         this.ui.showShortcutIndicator('-5s');
-        break;
+        return true;
       case 'ArrowRight':
-        if (!video) return;
+        if (!video) return false;
         e.preventDefault();
         this._seekBy(video, 5);
         this.ui.showShortcutIndicator('+5s');
-        break;
+        return true;
       case 'ArrowUp':
-        if (!video) return;
+        if (!video) return false;
         e.preventDefault();
         video.volume = Math.min(1, video.volume + 0.1);
+        if (video.volume > 0 && video.muted) video.muted = false;
         this.ui.showShortcutIndicator(`Volume ${Math.round(video.volume * 100)}%`);
-        break;
+        return true;
       case 'ArrowDown':
-        if (!video) return;
+        if (!video) return false;
         e.preventDefault();
         video.volume = Math.max(0, video.volume - 0.1);
         this.ui.showShortcutIndicator(`Volume ${Math.round(video.volume * 100)}%`);
-        break;
+        return true;
       case 'j':
-        if (!video) return;
+        if (!video) return false;
         e.preventDefault();
         this._seekBy(video, -10);
         this.ui.showShortcutIndicator('-10s');
-        break;
+        return true;
       case 'l':
-        if (!video) return;
+        if (!video) return false;
         e.preventDefault();
         this._seekBy(video, 10);
         this.ui.showShortcutIndicator('+10s');
-        break;
+        return true;
       case 'N':
-        if (e.shiftKey) {
-          e.preventDefault();
-          this.playNextEpisode();
-        }
-        break;
+        if (!e.shiftKey) return false;
+        e.preventDefault();
+        this.playNextEpisode();
+        return true;
       case 'P':
-        if (e.shiftKey) {
-          e.preventDefault();
-          this.playPreviousEpisode();
-        }
-        break;
+        if (!e.shiftKey) return false;
+        e.preventDefault();
+        this.playPreviousEpisode();
+        return true;
       case 'i':
         e.preventDefault();
         this.togglePictureInPicture();
-        break;
+        return true;
       case 'c':
         e.preventDefault();
         this.toggleCaptions();
-        break;
+        return true;
       case '>':
       case '.':
-        if (!video) return;
-        if (e.key === '>' || e.shiftKey) {
-          e.preventDefault();
-          this._bumpPlaybackRate(+1);
-        }
-        break;
+        if (!video) return false;
+        if (e.key !== '>' && !e.shiftKey) return false;
+        e.preventDefault();
+        this._bumpPlaybackRate(+1);
+        return true;
       case '<':
       case ',':
-        if (!video) return;
-        if (e.key === '<' || e.shiftKey) {
-          e.preventDefault();
-          this._bumpPlaybackRate(-1);
-        }
-        break;
+        if (!video) return false;
+        if (e.key !== '<' && !e.shiftKey) return false;
+        e.preventDefault();
+        this._bumpPlaybackRate(-1);
+        return true;
+      default:
+        return false;
     }
   }
 
@@ -658,11 +785,22 @@ class VideoPlayer {
       let initialFile = null;
       let startIndex = 0;
       if (isMultiEpisode) {
-        startIndex = (this.trackIndex !== null
+        if (this.trackIndex !== null
             && this.trackIndex >= 0
-            && this.trackIndex < deduplicatedFiles.length)
-          ? this.trackIndex : 0;
-        initialFile = deduplicatedFiles[startIndex]?.name || null;
+            && this.trackIndex < deduplicatedFiles.length) {
+          startIndex = this.trackIndex;
+        } else {
+          // No explicit ?track= — pick up the series where this device
+          // left off (saved alongside the item-level progress) instead of
+          // dropping the viewer back on episode 1 every visit.
+          const saved = this.progressTracker.getProgress(this.videoId);
+          const savedTrack = saved && Number.isInteger(saved.track) ? saved.track : null;
+          if (savedTrack !== null && savedTrack >= 0 && savedTrack < deduplicatedFiles.length) {
+            startIndex = savedTrack;
+          }
+        }
+        this.allVideoFiles = allFiles;
+        initialFile = this._preferredVariant(deduplicatedFiles[startIndex]?.name || null);
       } else if (this.preferredQualityLabel) {
         // Single-video case: honor the user's last picked quality so they
         // don't have to re-select 1080p on every new video.
@@ -683,41 +821,39 @@ class VideoPlayer {
       this.hideLoader();
       this.currentFileName = videoData.selectedFile?.name;
       this.setupVideoListeners(videoData.videoElement);
-
-      // Non-blocking resume
-      const progress = this.progressTracker.getProgress(this.videoId);
-      if (progress && videoData.videoElement && !this.requestedTimestamp) {
-        const timeStr = formatTime(progress.currentTime);
-        this.ui.showResumePrompt(timeStr, () => {
-          videoData.videoElement.currentTime = progress.currentTime;
-        });
-      }
-
-      // Apply requested timestamp
-      if (this.requestedTimestamp && videoData.videoElement) {
-        setTimeout(() => {
-          videoData.videoElement.currentTime = this.requestedTimestamp;
-        }, 300);
-      }
+      this.ui.hideResumePrompt();
 
       this.videoFiles = deduplicatedFiles;
       this.allVideoFiles = videoData.videoFiles;
 
       if (isMultiEpisode) {
         this.setupPlaylist(meta, deduplicatedFiles, startIndex);
+        const epTitle = this.videoService.getCleanTitle(initialFile, extractValue(meta.title));
+        this._updateMediaSession(epTitle, extractValue(meta.creator));
       } else {
         // Single video — make sure no playlist from a previous load lingers
         // in the service, or the failed-to-load auto-skip would try to
         // "advance to the next episode" of an item we're no longer playing.
         this.playlistService.clearPlaylist();
+        this.playlist.hide();
+        this._updateMediaSession(extractValue(meta.title), extractValue(meta.creator));
       }
 
-      // Quality selector for non-playlist single videos
-      if (!this.playlist.isVisible()) {
-        this.ui.buildQualityOptions(videoData.videoFiles, this.currentFileName, (filename) => {
-          this.switchQuality(filename);
-        });
+      if (videoData.videoElement) {
+        if (this.requestedTimestamp) {
+          // ?t=SECONDS deep link. Seek once the duration is known (the old
+          // fixed 300ms timer raced the metadata load and often lost).
+          this._seekWhenReady(videoData.videoElement, this.requestedTimestamp);
+        } else if (isMultiEpisode) {
+          this._offerTrackResume(videoData.videoElement, startIndex);
+        } else {
+          this._offerResume(videoData.videoElement);
+        }
       }
+
+      // Quality selector. Single videos offer every encode of the item;
+      // series offer the encodes of the episode that is playing.
+      this._buildQualityOptions(this.currentFileName);
 
       // Downloads
       this.buildDownloadLinks(deduplicatedFiles.length > 0 ? deduplicatedFiles : videoData.videoFiles);
@@ -924,20 +1060,23 @@ class VideoPlayer {
     if (videoEl.dataset.afcListenersAttached === '1') return;
     videoEl.dataset.afcListenersAttached = '1';
 
-    // Click-to-toggle-play. Native <video controls> doesn't do this on
-    // desktop, but every user trained on YouTube expects it. Filter out
-    // clicks on the native controls bar (bottom ~40px) so we don't
-    // intercept the user's seek/volume drags.
-    videoEl.addEventListener('click', (e) => {
-      const rect = videoEl.getBoundingClientRect();
-      const distFromBottom = rect.bottom - e.clientY;
-      if (distFromBottom < 50) return; // native controls area
-      if (videoEl.paused) {
-        videoEl.play().catch(() => {});
-      } else {
-        videoEl.pause();
-      }
-    });
+    // Click-to-pause is the browser's job. Every modern engine (Chromium,
+    // Firefox, WebKit) already toggles play/pause when a <video controls>
+    // element is clicked. A page-level click handler used to toggle it a
+    // second time on the same click, undoing the native toggle — the video
+    // paused for a frame and then kept playing. Do not add one back.
+
+    // Keyboard: once the user clicks the video it holds focus, and the
+    // native controls then handle Space / arrow keys on their own. The
+    // page-level shortcut handler (document keydown) ran as well, so Space
+    // paused-then-resumed and the arrows seeked twice. Intercept at the
+    // element in the capture phase — before the native controls see the
+    // event — and route to the single shortcut handler; when it handles
+    // the key, stop the event so neither the native controls nor the
+    // document listener act on it a second time.
+    videoEl.addEventListener('keydown', (e) => {
+      if (this.handleKeyboard(e)) e.stopImmediatePropagation();
+    }, true);
 
     // Double-click anywhere on the video toggles fullscreen.
     videoEl.addEventListener('dblclick', (e) => {
@@ -966,8 +1105,12 @@ class VideoPlayer {
       this._applyCaptionState(videoEl);
     });
 
+    // `duration` is Infinity for live/unbounded sources; those can't have a
+    // meaningful resume point and would poison the progress store.
+    const hasDuration = () => Number.isFinite(videoEl.duration) && videoEl.duration > 0;
+
     videoEl.addEventListener('pause', () => {
-      if (this.videoId && videoEl.currentTime && videoEl.duration) {
+      if (this.videoId && videoEl.currentTime && hasDuration()) {
         this.progressTracker.saveProgress(this.videoId, videoEl.currentTime, videoEl.duration, this._currentVideoMeta());
         const idx = this.playlistService.getCurrentIndex();
         if (this.playlist.isVisible() && this.playlistService.getPlaylist()) {
@@ -979,7 +1122,7 @@ class VideoPlayer {
     // Periodically persist per-episode progress to drive playlist progress bars.
     if (this._trackProgressInterval) clearInterval(this._trackProgressInterval);
     this._trackProgressInterval = setInterval(() => {
-      if (!videoEl || videoEl.paused || !videoEl.duration) return;
+      if (!videoEl || videoEl.paused || !hasDuration()) return;
       const idx = this.playlistService.getCurrentIndex();
       if (this.playlist.isVisible() && this.playlistService.getPlaylist()) {
         this.playlist.saveTrackProgress(idx, videoEl.currentTime, videoEl.duration);
@@ -987,7 +1130,7 @@ class VideoPlayer {
     }, 5000);
 
     videoEl.addEventListener('ended', () => {
-      if (this.videoId && videoEl.duration) {
+      if (this.videoId && hasDuration()) {
         this.progressTracker.saveProgress(this.videoId, videoEl.duration, videoEl.duration, this._currentVideoMeta());
       }
       const idx = this.playlistService.getCurrentIndex();
@@ -1179,15 +1322,38 @@ class VideoPlayer {
       }
 
       // Update quality UI
-      this.ui.buildQualityOptions(this.allVideoFiles, filename, (fn) => {
-        this.switchQuality(fn);
-      });
+      this._buildQualityOptions(filename);
 
       this.toast.show('Quality changed', 'info');
     } catch (err) {
       this.hideLoader();
       this.toast.show('Failed to switch quality', 'error');
     }
+  }
+
+  /**
+   * Every playable encode (quality / container variant) of one episode.
+   * Playlist entries are de-duplicated to one file per episode, but the
+   * item usually still carries the 512kb / h264 / HD siblings.
+   */
+  _qualityVariantsFor(fileName) {
+    if (!fileName) return [];
+    const base = this.videoService.normalizeBaseName(fileName);
+    return (this.allVideoFiles || []).filter(f => this.videoService.normalizeBaseName(f.name) === base);
+  }
+
+  /** Swap `fileName` for the sibling matching the user's remembered quality, if any. */
+  _preferredVariant(fileName) {
+    if (!fileName || !this.preferredQualityLabel) return fileName;
+    const mp4s = this._qualityVariantsFor(fileName).filter(f => (f.name || '').toLowerCase().endsWith('.mp4'));
+    const match = mp4s.find(f => this.ui.getQualityLabel(f.name) === this.preferredQualityLabel);
+    return match ? match.name : fileName;
+  }
+
+  _buildQualityOptions(fileName) {
+    const inPlaylist = !!this.playlistService.getPlaylist();
+    const files = inPlaylist ? this._qualityVariantsFor(fileName) : this.allVideoFiles;
+    this.ui.buildQualityOptions(files || [], fileName, (fn) => this.switchQuality(fn));
   }
 
   // ========================================
@@ -1224,21 +1390,39 @@ class VideoPlayer {
     this.ui.showEpisodeControls(index, pl.videoFiles.length);
     this.showLoader();
 
+    // Honour the remembered quality tier for this episode's encodes.
+    const fileToPlay = this._preferredVariant(file.name);
+
     try {
       const videoData = await this.videoService.loadNativeVideo(
         pl.id,
-        { metadata: pl.metadata, files: pl.videoFiles },
+        // Full file list (not the de-duplicated playlist) so any encode of
+        // the episode can be selected.
+        { metadata: pl.metadata, files: this.allVideoFiles && this.allVideoFiles.length ? this.allVideoFiles : pl.videoFiles },
         this.videoWrapper,
-        file.name,
+        fileToPlay,
         this.getSavedVolume()
       );
       this.hideLoader();
-      this.currentFileName = file.name;
+      this.currentFileName = fileToPlay;
       this.setupVideoListeners(videoData.videoElement);
+      this.ui.hideResumePrompt();
+      this._buildQualityOptions(fileToPlay);
 
-      // Update title
-      const epTitle = this.videoService.getCleanTitle(file.name, extractValue(pl.metadata?.title));
+      // Update title (page + tab + OS media overlay)
+      const seriesTitle = extractValue(pl.metadata?.title) || '';
+      const epTitle = this.videoService.getCleanTitle(file.name, seriesTitle);
       if (this.videoTitle) this.videoTitle.textContent = epTitle;
+      const siteName = this.siteSettings.siteName || 'Archive Film Club';
+      document.title = seriesTitle && seriesTitle !== epTitle
+        ? `${epTitle} · ${seriesTitle} - ${siteName}`
+        : `${epTitle} - ${siteName}`;
+      this._updateMediaSession(epTitle, extractValue(pl.metadata?.creator));
+
+      // Remember the episode for next visit even before any progress ticks.
+      if (videoData.videoElement) {
+        this._offerTrackResume(videoData.videoElement, index);
+      }
 
     } catch (err) {
       console.error('Error loading playlist item:', err);

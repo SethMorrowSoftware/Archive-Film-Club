@@ -11,11 +11,36 @@ require_once __DIR__ . '/../bootstrap.php';
 $api = new ApiController();
 $api->requireMethod(['GET', 'POST']);
 
-$settingsService = new SettingsService();
+$jsonPath = base_path('featured-sections.json');
+
+// The service needs a live connection. A dead DB must not 500 here: GET
+// serves the JSON recovery file and POST has to reach the file_put_contents
+// fallback below — which it never could while `new SettingsService()` threw
+// before any of that code ran.
+$settingsService = null;
+try {
+    $settingsService = new SettingsService();
+} catch (Throwable $e) {
+    error_log('[api/sections] database unavailable, using JSON fallback: ' . $e->getMessage());
+}
 
 if ($api->isGet()) {
     header('Cache-Control: public, max-age=300');
-    $api->data($settingsService->getFeaturedSections());
+    if ($settingsService) {
+        try {
+            $api->data($settingsService->getFeaturedSections());
+        } catch (Throwable $e) {
+            error_log('[api/sections] read failed: ' . $e->getMessage());
+        }
+    }
+    $fallback = ['sections' => []];
+    if (is_readable($jsonPath)) {
+        $decoded = json_decode((string)@file_get_contents($jsonPath), true);
+        if (is_array($decoded) && isset($decoded['sections']) && is_array($decoded['sections'])) {
+            $fallback['sections'] = $decoded['sections'];
+        }
+    }
+    $api->data($fallback);
 }
 
 // POST
@@ -74,13 +99,14 @@ $output = [
 ];
 
 $dbSaveSuccess = false;
-try {
-    $dbSaveSuccess = $settingsService->updateFeaturedSections($output);
-} catch (Throwable $e) {
-    error_log('[api/sections] DB save failed: ' . $e->getMessage());
+if ($settingsService) {
+    try {
+        $dbSaveSuccess = $settingsService->updateFeaturedSections($output);
+    } catch (Throwable $e) {
+        error_log('[api/sections] DB save failed: ' . $e->getMessage());
+    }
 }
 
-$jsonPath = base_path('featured-sections.json');
 if (!$dbSaveSuccess) {
     // DB save failed — write JSON as a recovery file. LOCK_EX guards
     // against concurrent admin saves writing a half-formed file.

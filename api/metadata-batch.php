@@ -55,6 +55,14 @@ if (empty($ids)) {
 // Cap to a sane limit so the endpoint can't be used to hammer Archive.org
 $ids = array_slice($ids, 0, 50);
 
+// How many UNCACHED ids one request may fetch from archive.org synchronously.
+// The endpoint is public (the homepage calls it for guests), so without this
+// a single anonymous request could fan out 50 upstream fetches. Anything past
+// the cap is handed to the background cache queue instead and answered with
+// a stub this time round; the short MISS cache header below brings the
+// client back once the cron/queue has filled the rows in.
+$MAX_SYNC_FETCH = 5;
+
 try {
     $archiveService = new ArchiveOrgService();
     $cacheManager = new CacheManager();
@@ -73,12 +81,30 @@ try {
         }
 
         if ($cached !== null) {
-            unset($cached['raw_metadata'], $cached['_is_stale']);
-            $results[$id] = $cached;
+            // Same public shape as a miss (drops internal columns too).
+            $results[$id] = CacheManager::normalizeMetadataRow($cached);
         } else {
             $needsFetch[] = $id;
             $allCached = false;
         }
+    }
+
+    // Bound the synchronous upstream work; queue the rest.
+    $deferred = [];
+    if (count($needsFetch) > $MAX_SYNC_FETCH) {
+        $deferred = array_slice($needsFetch, $MAX_SYNC_FETCH);
+        $needsFetch = array_slice($needsFetch, 0, $MAX_SYNC_FETCH);
+    }
+    foreach ($deferred as $id) {
+        // queueForCaching() is best-effort and swallows its own DB errors.
+        $cacheManager->queueForCaching($id, 'metadata', 4);
+        $results[$id] = [
+            'identifier' => $id,
+            'title' => $id,
+            'thumbnail' => "https://archive.org/services/img/{$id}",
+            '_unavailable' => true,
+            '_queued' => true,
+        ];
     }
 
     // Second pass: fetch anything that wasn't cached, IN PARALLEL.
@@ -95,8 +121,7 @@ try {
         foreach ($needsFetch as $id) {
             $meta = $batchResult[$id] ?? null;
             if ($meta) {
-                unset($meta['raw_metadata'], $meta['_is_stale']);
-                $results[$id] = $meta;
+                $results[$id] = CacheManager::normalizeMetadataRow($meta);
             } else {
                 // Minimal stub so the client can still render a card.
                 $results[$id] = [

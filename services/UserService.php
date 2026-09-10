@@ -53,6 +53,7 @@ class UserService {
     }
 
     public function setPreferences(array $prefs): bool {
+        if ($this->context->isTransient()) return false;
         $this->repo->setPreferences($this->context->currentId(), $prefs);
         $this->context->refresh();
         return true;
@@ -72,11 +73,17 @@ class UserService {
         return $this->bookmarks->getAll($this->context->currentId());
     }
 
+    // Write paths no-op for a transient (crawler) guest — there is no users
+    // row for user_id 0 to own the data, and the FK would reject the INSERT.
+    // Reads are fine: user_id 0 simply matches nothing.
+
     public function addBookmark(string $archiveId, array $metadata = []): bool {
+        if ($this->context->isTransient()) return false;
         return $this->bookmarks->add($this->context->currentId(), $archiveId, $metadata);
     }
 
     public function removeBookmark(string $archiveId): bool {
+        if ($this->context->isTransient()) return false;
         $this->bookmarks->remove($this->context->currentId(), $archiveId);
         return true;
     }
@@ -86,6 +93,7 @@ class UserService {
     }
 
     public function syncBookmarks(array $bookmarks): bool {
+        if ($this->context->isTransient()) return false;
         return $this->bookmarks->sync($this->context->currentId(), $bookmarks);
     }
 
@@ -98,6 +106,7 @@ class UserService {
     }
 
     public function updateProgress(string $archiveId, float $currentTime, float $duration): bool {
+        if ($this->context->isTransient()) return false;
         $this->history->updateProgress($this->context->currentId(), $archiveId, $currentTime, $duration);
         return true;
     }
@@ -107,6 +116,7 @@ class UserService {
     }
 
     public function clearWatchHistory(): bool {
+        if ($this->context->isTransient()) return false;
         $this->history->clear($this->context->currentId());
         return true;
     }
@@ -116,6 +126,7 @@ class UserService {
     // =====================================================
 
     public function addSearchHistory(string $query, array $filters = [], int $resultCount = 0): void {
+        if ($this->context->isTransient()) return;
         $this->searches->record($this->context->currentId(), $query, $filters, $resultCount);
     }
 
@@ -124,6 +135,7 @@ class UserService {
     }
 
     public function clearSearchHistory(): bool {
+        if ($this->context->isTransient()) return false;
         $this->searches->clear($this->context->currentId());
         return true;
     }

@@ -395,27 +395,24 @@ class MaintenanceService
 
             foreach ($files as $file) {
                 $sql = (string)file_get_contents($file);
-                // Strip line comments before splitting on ';' (a comment can
-                // contain a semicolon). Mirrors install.php's runner exactly.
-                $sql = preg_replace('/^\s*--[^\n]*$/m', '', $sql);
-                $statements = array_filter(
-                    array_map('trim', explode(';', $sql)),
-                    function ($s) { return $s !== ''; }
-                );
+                // Quote/comment-aware split — the same splitter restore uses
+                // and install.php's runner calls. A naive explode(';') breaks
+                // on semicolons inside `--` comments and inside the string
+                // literals migration 007 builds its dynamic ALTERs from.
+                $statements = self::splitSqlStatements($sql);
 
                 $fileApplied = 0;
                 $fileSkipped = 0;
                 foreach ($statements as $statement) {
                     try {
+                        // exec(), not prepare(): 007's PREPARE/EXECUTE is
+                        // refused by the server-side prepared-statement protocol.
                         $this->pdo->exec($statement);
                         $applied++;
                         $fileApplied++;
                     } catch (Throwable $e) {
                         $msg = $e->getMessage();
-                        if (stripos($msg, 'already exists') === false
-                            && stripos($msg, 'Duplicate column') === false
-                            && stripos($msg, 'Duplicate key name') === false
-                            && stripos($msg, 'Multiple primary key') === false) {
+                        if (!self::isIgnorableMigrationError($msg)) {
                             throw new RuntimeException(
                                 'Migration ' . basename($file) . ' failed: ' . $msg
                             );
@@ -660,6 +657,37 @@ class MaintenanceService
             'safety_snapshot' => $snapshot !== null ? basename($snapshot) : null,
             'gzip' => isset($decoded),
         ];
+    }
+
+    /**
+     * Is this a "the schema is already in this state" error that a migration
+     * re-run may safely ignore? Shared by install.php's runner and
+     * runMigrations() so both swallow exactly the same set. The phrases cover
+     * both MySQL and MariaDB wording for: table/index already exists,
+     * duplicate column/key/FK name (errno 121 is MySQL 5.7's "Can't write;
+     * duplicate key in table" on ADD CONSTRAINT), a DROP of an index/FK that
+     * is already gone, and MySQL 8's "check that column/key exists" phrasing.
+     * Belt and braces: migration 007 avoids all of these by construction.
+     */
+    public static function isIgnorableMigrationError(string $message): bool
+    {
+        $ignorable = [
+            'already exists',
+            'Duplicate column',
+            'Duplicate key name',
+            'Duplicate foreign key',
+            'Multiple primary key',
+            'errno: 121',
+            "Can't DROP",
+            'check that column/key exists',
+            'check that it exists',
+        ];
+        foreach ($ignorable as $needle) {
+            if (stripos($message, $needle) !== false) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

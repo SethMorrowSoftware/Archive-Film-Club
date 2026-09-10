@@ -148,6 +148,7 @@ class MetricsService {
         try {
             $rows = $this->db->fetchAll($sql, [$days]);
         } catch (Throwable $e) {
+            error_log('[MetricsService::dailySeries] ' . $metric . ': ' . $e->getMessage());
             return $this->padDays([], $days);
         }
 
@@ -208,12 +209,17 @@ class MetricsService {
         $limit = max(1, min(100, $limit));
         $days = max(1, min(365, $days));
         try {
+            // user_watch_history has no title column; the title lives in
+            // video_metadata_cache (unique on archive_id, so MAX() over the
+            // LEFT JOIN is a no-op that keeps the GROUP BY happy). Fall back
+            // to the identifier for items whose metadata was never cached.
             return $this->db->fetchAll(
                 "SELECT h.archive_id,
-                        MAX(h.title) AS title,
+                        COALESCE(MAX(m.title), h.archive_id) AS title,
                         COUNT(DISTINCT h.user_id) AS unique_viewers,
                         COUNT(*) AS sessions
                  FROM user_watch_history h
+                 LEFT JOIN video_metadata_cache m ON m.archive_id = h.archive_id
                  WHERE h.last_watched > (NOW() - INTERVAL ? DAY)
                  GROUP BY h.archive_id
                  ORDER BY unique_viewers DESC, sessions DESC
@@ -221,6 +227,7 @@ class MetricsService {
                 [$days]
             );
         } catch (Throwable $e) {
+            error_log('[MetricsService::topVideos] ' . $e->getMessage());
             return [];
         }
     }
@@ -235,6 +242,7 @@ class MetricsService {
                  LIMIT $limit"
             );
         } catch (Throwable $e) {
+            error_log('[MetricsService::topSearches] popular_searches: ' . $e->getMessage());
             // Fall back to search_history if popular_searches isn't populated.
             try {
                 return $this->db->fetchAll(
@@ -246,6 +254,7 @@ class MetricsService {
                      LIMIT $limit"
                 );
             } catch (Throwable $e2) {
+                error_log('[MetricsService::topSearches] search_history: ' . $e2->getMessage());
                 return [];
             }
         }
@@ -268,19 +277,30 @@ class MetricsService {
                 [$days]
             );
         } catch (Throwable $e) {
+            error_log('[MetricsService::topCommenters] ' . $e->getMessage());
             return [];
         }
     }
 
-    public function recentSignups(int $limit = 10): array {
+    /**
+     * @param bool $includeEmail Email addresses are personal data; only a
+     *   FULL admin (not an editor) gets them. The API passes the caller's role.
+     */
+    public function recentSignups(int $limit = 10, bool $includeEmail = true): array {
         $limit = max(1, min(100, $limit));
-        return $this->db->fetchAll(
-            "SELECT id, username, display_name, email, role, created_at, last_seen
-             FROM users
-             WHERE is_guest = 0
-             ORDER BY created_at DESC
-             LIMIT $limit"
-        );
+        $emailCol = $includeEmail ? 'email' : 'NULL AS email';
+        try {
+            return $this->db->fetchAll(
+                "SELECT id, username, display_name, $emailCol, role, created_at, last_seen
+                 FROM users
+                 WHERE is_guest = 0
+                 ORDER BY created_at DESC
+                 LIMIT $limit"
+            );
+        } catch (Throwable $e) {
+            error_log('[MetricsService::recentSignups] ' . $e->getMessage());
+            return [];
+        }
     }
 
     public function recentComments(int $limit = 10): array {
@@ -297,6 +317,7 @@ class MetricsService {
                  LIMIT $limit"
             );
         } catch (Throwable $e) {
+            error_log('[MetricsService::recentComments] ' . $e->getMessage());
             return [];
         }
     }
@@ -305,12 +326,18 @@ class MetricsService {
     // USERS LIST (admin Users panel)
     // =====================================================
 
+    /**
+     * $opts: page, per_page, role (all|admin|editor|viewer), search, and
+     * include_email (bool, default true) — email addresses are personal data
+     * and are only returned to a FULL admin; the API passes the caller's role.
+     */
     public function listUsers(array $opts = []): array {
         $page = max(1, (int)($opts['page'] ?? 1));
         $perPage = max(10, min(100, (int)($opts['per_page'] ?? 25)));
         $offset = ($page - 1) * $perPage;
         $role = $opts['role'] ?? 'all';     // all | admin | editor | viewer
         $search = trim((string)($opts['search'] ?? ''));
+        $includeEmail = !array_key_exists('include_email', $opts) || (bool)$opts['include_email'];
 
         $where = ["is_guest = 0"];
         $params = [];
@@ -320,7 +347,9 @@ class MetricsService {
         }
         if ($search !== '') {
             $where[] = "(username LIKE ? OR email LIKE ? OR display_name LIKE ?)";
-            $like = '%' . $search . '%';
+            // Escape LIKE metacharacters so "%" / "_" in the search box match
+            // literally instead of turning the filter into a wildcard.
+            $like = '%' . addcslashes($search, '\\%_') . '%';
             $params[] = $like; $params[] = $like; $params[] = $like;
         }
         $whereSql = implode(' AND ', $where);
@@ -330,8 +359,9 @@ class MetricsService {
             $params
         );
 
+        $emailCol = $includeEmail ? 'u.email' : 'NULL AS email';
         $rows = $this->db->fetchAll(
-            "SELECT u.id, u.username, u.email, u.display_name, u.role,
+            "SELECT u.id, u.username, $emailCol, u.display_name, u.role,
                     u.email_verified_at, u.created_at, u.last_seen,
                     (SELECT COUNT(*) FROM user_bookmarks b WHERE b.user_id = u.id) AS bookmark_count,
                     (SELECT COUNT(*) FROM user_watch_history h WHERE h.user_id = u.id) AS watch_count
@@ -359,7 +389,10 @@ class MetricsService {
                     $commentCounts[(int)$row['user_id']] = (int)$row['c'];
                 }
             }
-        } catch (Throwable $e) { /* table missing */ }
+        } catch (Throwable $e) {
+            // video_comments missing (migration 006 not run) — counts stay 0.
+            error_log('[MetricsService::listUsers] comment counts: ' . $e->getMessage());
+        }
 
         foreach ($rows as &$r) {
             $r['comment_count'] = $commentCounts[(int)$r['id']] ?? 0;
@@ -455,6 +488,7 @@ class MetricsService {
                 $params
             );
         } catch (Throwable $e) {
+            error_log('[MetricsService::listCommentsForModeration] ' . $e->getMessage());
             return [
                 'comments' => [],
                 'pagination' => ['page' => 1, 'per_page' => $perPage, 'total' => 0, 'pages' => 1],
@@ -484,7 +518,10 @@ class MetricsService {
                 'comment_id = ? AND resolved_at IS NULL',
                 [$commentId]
             );
-        } catch (Throwable $e) { /* table missing */ }
+        } catch (Throwable $e) {
+            // comment_reports missing (migration 006 not run).
+            error_log('[MetricsService::resolveReportsFor] ' . $e->getMessage());
+        }
     }
 
     // =====================================================
@@ -499,6 +536,9 @@ class MetricsService {
         try {
             return (int)$this->db->fetchColumn($sql, $params);
         } catch (Throwable $e) {
+            // Logged (not silent) so a broken query — as opposed to a table
+            // that simply isn't there yet — is visible in the error log.
+            error_log('[MetricsService::intQuery] ' . $e->getMessage());
             return 0;
         }
     }

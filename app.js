@@ -18,9 +18,9 @@ import {
 } from './src/js/utils/helpers.js';
 import { UIFeedback } from './src/js/utils/uiFeedback.js';
 import { UrlManager } from './src/js/utils/urlManager.js';
+import { trapFocus } from './src/js/utils/focusTrap.js';
 
 // Import services
-import { SearchCache } from './src/js/services/SearchCache.js';
 import { SearchService } from './src/js/services/SearchService.js';
 import { VideoProgressTracker } from './src/js/services/VideoProgressTracker.js';
 import { BookmarkManager } from './src/js/services/BookmarkManager.js';
@@ -33,7 +33,6 @@ import { RecommendedManager } from './src/js/components/RecommendedManager.js';
 import { ContinueWatchingManager } from './src/js/components/ContinueWatchingManager.js';
 import { FeaturedSectionsManager } from './src/js/components/FeaturedSectionsManager.js';
 import { Toast } from './src/js/components/Toast.js';
-import { LoadingSkeleton } from './src/js/components/LoadingSkeleton.js';
 import { AuthNav } from './src/js/components/AuthNav.js';
 
 // Mount auth nav as early as possible so the header doesn't flash empty
@@ -52,6 +51,10 @@ class ArchiveVideoSearch {
     // for stale requests.
     this._searchToken = 0;
     this._searchAbort = null;
+    // Set while a popstate is being replayed so performSearch() doesn't
+    // write the URL we're restoring FROM back into history (which turned
+    // Back into a trap: every Back press pushed a fresh entry).
+    this._restoringFromHistory = false;
 
     // Load site settings from admin panel
     this.siteSettings = this.loadSiteSettings();
@@ -62,12 +65,10 @@ class ArchiveVideoSearch {
     // Initialize services
     this.searchService = new SearchService();
     this.progressTracker = new VideoProgressTracker();
-    this.searchCache = new SearchCache();
     this.bookmarkManager = new BookmarkManager();
     this.offlineHandler = new OfflineHandler();
     this.backgroundCacheService = new BackgroundCacheService();
     this.toast = new Toast();
-    this.loadingSkeleton = new LoadingSkeleton();
     this.uiFeedback = new UIFeedback();
 
     // User preferences
@@ -81,6 +82,11 @@ class ArchiveVideoSearch {
     this.loadUserPreferences();
     this.setupSearchSuggestions();
 
+    // The server-side bookmark list arrives asynchronously (after login /
+    // me.php resolves). Cards rendered before that would keep showing the
+    // stale guest state, so re-sync the icons whenever the list changes.
+    this.bookmarkManager.onChange(() => this.syncBookmarkButtons());
+
     // Initialize recommended section and featured sections.
     // These render independently from the search results — there's no
     // ordering constraint, so kick them off in parallel WITH the search
@@ -92,7 +98,6 @@ class ArchiveVideoSearch {
     this.recommendedManager = new RecommendedManager(this);
     this.featuredSectionsManager = new FeaturedSectionsManager(this);
     this.continueWatchingManager = new ContinueWatchingManager(this, this.progressTracker);
-    window.featuredSectionsManager = this.featuredSectionsManager;
 
     // Continue Watching is purely local-storage-driven, so it can render
     // synchronously before the network-backed sections.
@@ -189,15 +194,18 @@ class ArchiveVideoSearch {
       this.searchForm.addEventListener('submit', e => {
         e.preventDefault();
         this.currentPage = 1;
-        this.performSearch();
+        this.performSearch({ pushHistory: true, recordHistory: true });
       });
     }
 
     if (this.searchInput) {
       this.searchInput.addEventListener('input', () => {
         this.debounceSearch(() => {
+          // Search on ANY change (deleting back to 1–2 chars used to leave
+          // the previous results on screen). Skip only when the effective
+          // query is unchanged, e.g. trailing whitespace.
           const value = this.searchInput.value.trim();
-          if (value.length > 2 || value.length === 0) {
+          if ((value || '*') !== this.currentQuery) {
             this.currentPage = 1;
             this.performSearch();
           }
@@ -229,11 +237,11 @@ class ArchiveVideoSearch {
 
     if (this.sortBy) {
       this.sortBy.addEventListener('change', () => {
-        if (this.hasActiveSearch()) {
-          this.currentPage = 1;
-          this.performSearch();
-          this.saveUserPreferences();
-        }
+        // No hasActiveSearch() gate: the default "All Videos" listing is
+        // sortable too, and silently ignoring the change looked broken.
+        this.currentPage = 1;
+        this.performSearch();
+        this.saveUserPreferences();
       });
     }
 
@@ -249,7 +257,14 @@ class ArchiveVideoSearch {
     }
 
     window.addEventListener('popstate', () => {
-      this.handleUrlParameters();
+      // performSearch() writes the URL synchronously before its first
+      // await, so the flag only needs to cover the synchronous part.
+      this._restoringFromHistory = true;
+      try {
+        this.handleUrlParameters();
+      } finally {
+        this._restoringFromHistory = false;
+      }
     });
 
     this.setupMobileMenu();
@@ -291,7 +306,7 @@ class ArchiveVideoSearch {
         this.searchInput,
         () => {
           this.currentPage = 1;
-          this.performSearch();
+          this.performSearch({ pushHistory: true, recordHistory: true });
         }
       );
     }
@@ -411,13 +426,25 @@ class ArchiveVideoSearch {
       return;
     }
 
-    if (urlState.search || urlState.collection) {
-      if (urlState.search && this.searchInput) this.searchInput.value = urlState.search;
-      const collections = this.searchService.getCollections();
-      if (urlState.collection && collections[urlState.collection] && this.collection) {
-        this.collection.value = urlState.collection;
+    // Mirror the URL into the controls unconditionally. On first load this
+    // is a no-op; on popstate it's what makes Back actually go back (the
+    // input used to keep the newer query, so the "restored" search re-ran
+    // the current one).
+    if (this.searchInput) {
+      this.searchInput.value = urlState.search || '';
+      if (this.clearSearchBtn) {
+        this.clearSearchBtn.style.display = this.searchInput.value ? 'flex' : 'none';
       }
-      if (urlState.page > 0) this.currentPage = urlState.page;
+    }
+
+    if (urlState.search || urlState.collection) {
+      const collections = this.searchService.getCollections();
+      if (this.collection) {
+        this.collection.value = (urlState.collection && collections[urlState.collection])
+          ? urlState.collection
+          : 'all_videos';
+      }
+      this.currentPage = urlState.page > 0 ? urlState.page : 1;
       this.performSearch();
     } else {
       this.loadInitialSearch();
@@ -425,11 +452,22 @@ class ArchiveVideoSearch {
   }
 
   loadInitialSearch() {
-    const defaultCollection = this.siteSettings.defaultCollection || 'all_videos';
-    const defaultSort = this.siteSettings.defaultSort || 'downloads';
+    // Admin defaults only fill in when the user has no saved preference of
+    // their own — loadUserPreferences() already applied those, and
+    // stomping them here meant the sidebar quietly reset on every visit.
+    const collections = this.searchService.getCollections();
+    const prefCollection = this.userPreferences?.collection;
+    const prefSort = this.userPreferences?.sortBy;
 
-    if (this.collection) this.collection.value = defaultCollection;
-    if (this.sortBy) this.sortBy.value = defaultSort;
+    if (this.collection) {
+      this.collection.value = (prefCollection && collections[prefCollection])
+        ? prefCollection
+        : (this.siteSettings.defaultCollection || 'all_videos');
+    }
+    if (this.sortBy) {
+      this.sortBy.value = prefSort || this.siteSettings.defaultSort || 'downloads';
+    }
+    this.currentPage = 1;
     this.performSearch();
   }
 
@@ -448,7 +486,16 @@ class ArchiveVideoSearch {
   // Search & Results
   // ========================================
 
-  async performSearch() {
+  /**
+   * @param {Object}  [opts]
+   * @param {boolean} [opts.pushHistory=false]   Add a Back stop. Only for
+   *        explicit navigations (submit, pagination, opening a collection);
+   *        typing and filter tweaks replace the current entry instead.
+   * @param {boolean} [opts.recordHistory=false] Save the term to the
+   *        suggestions history. Only on submit / suggestion pick, so the
+   *        debounced partials ("s", "st", "sta"...) don't pollute it.
+   */
+  async performSearch({ pushHistory = false, recordHistory = false } = {}) {
     // Cancel any in-flight search so a slow/failed older request can't
     // overwrite a newer successful one (race when user types quickly).
     if (this._searchAbort) {
@@ -461,16 +508,20 @@ class ArchiveVideoSearch {
     const term = this.searchInput?.value.trim() || '';
     this.currentQuery = term || '*';
 
-    if (term && this.searchSuggestions) {
+    if (recordHistory && term && this.searchSuggestions) {
       this.searchSuggestions.addToHistory(term);
     }
 
-    const urlParams = UrlManager.buildSearchUrl({
-      search: term || undefined,
-      collection: (this.collection?.value !== 'all_videos') ? this.collection.value : undefined,
-      page: this.currentPage > 1 ? String(this.currentPage) : undefined
-    });
-    UrlManager.updateUrl(urlParams, true);
+    // Never touch the URL while replaying a popstate — we'd be rewriting
+    // the very entry the user just navigated to.
+    if (!this._restoringFromHistory) {
+      const urlParams = UrlManager.buildSearchUrl({
+        search: term || undefined,
+        collection: (this.collection?.value !== 'all_videos') ? this.collection.value : undefined,
+        page: this.currentPage > 1 ? String(this.currentPage) : undefined
+      });
+      UrlManager.updateUrl(urlParams, pushHistory);
+    }
 
     this.uiFeedback.showLoading();
     this.uiFeedback.hideError();
@@ -620,6 +671,23 @@ class ArchiveVideoSearch {
     });
   }
 
+  /**
+   * Re-sync every rendered card's bookmark toggle with the manager's list.
+   * Called from bookmarkManager.onChange, so cards rendered before the
+   * server list arrived (or before a login/logout) catch up.
+   */
+  syncBookmarkButtons() {
+    if (!this.results) return;
+    this.results.querySelectorAll('.result-card').forEach(card => {
+      const btn = card.querySelector('.btn-bookmark');
+      if (!btn) return;
+      const on = this.bookmarkManager.isBookmarked(card.dataset.identifier);
+      if (btn.classList.contains('bookmarked') === on) return;
+      btn.classList.toggle('bookmarked', on);
+      btn.innerHTML = on ? ICONS.bookmarkFilled : ICONS.bookmark;
+    });
+  }
+
   openCollection(card, id) {
     const collections = this.searchService.getCollections();
     if (!collections[id]) {
@@ -636,7 +704,7 @@ class ArchiveVideoSearch {
       this.collectionsOnly.checked = false;
     }
 
-    this.performSearch();
+    this.performSearch({ pushHistory: true });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
@@ -686,8 +754,6 @@ class ArchiveVideoSearch {
       actionButtonHtml = `<button class="btn btn-play btn-primary-action"><span class="btn-icon">${ICONS.play}</span> ${progress ? 'Resume' : 'Play'}</button>`;
     }
 
-    const placeholderIcon = mediatype === 'collection' ? '&#128193;' : '&#127916;';
-
     // Build meta items based on admin settings
     let metaItems = [];
     if (showCreator) {
@@ -709,7 +775,7 @@ class ArchiveVideoSearch {
                class="result-thumb"
                loading="lazy"
                decoding="async"
-               onerror="this.style.display='none'; this.parentNode.innerHTML='<div class=thumb-placeholder>${placeholderIcon}</div>'"/>
+               onerror="this.style.display='none';this.parentNode.classList.add('thumb-missing')"/>
           ${runtime && mediatype !== 'collection' ? `<span class="runtime-badge">${runtime}</span>` : ''}
           ${isPD ? `<span class="license-badge">Public Domain</span>` : ''}
           ${progressBar}
@@ -773,7 +839,9 @@ class ArchiveVideoSearch {
     const input = overlay.querySelector('input');
     input.value = url;
     document.body.appendChild(overlay);
-    input.focus();
+    // trapFocus keeps Tab inside the dialog, locks body scroll, and hands
+    // focus back to the Share button on release.
+    const releaseTrap = trapFocus(overlay, { initialFocus: input });
     input.select();
     // close() always tears down BOTH the overlay and the document-level
     // keydown listener — otherwise dismissing via the X button or a
@@ -782,6 +850,7 @@ class ArchiveVideoSearch {
     const onKey = (e) => { if (e.key === 'Escape') close(); };
     const close = () => {
       document.removeEventListener('keydown', onKey);
+      releaseTrap();
       overlay.remove();
     };
     overlay.querySelector('.share-modal-close').onclick = close;
@@ -823,7 +892,8 @@ class ArchiveVideoSearch {
     const start = Math.max(1, this.currentPage - 2);
     const end = Math.min(paginationInfo.totalPages, this.currentPage + 2);
     for (let i = start; i <= end; i++) {
-      html += `<button class="${i === this.currentPage ? 'active' : ''}" data-page="${i}">${i}</button>`;
+      const isCurrent = i === this.currentPage;
+      html += `<button class="${isCurrent ? 'active' : ''}" data-page="${i}" aria-label="Page ${i}"${isCurrent ? ' aria-current="page"' : ''}>${i}</button>`;
     }
 
     if (this.currentPage < paginationInfo.totalPages - 2) {
@@ -839,7 +909,7 @@ class ArchiveVideoSearch {
     this.pagination.querySelectorAll('button[data-page]').forEach(btn => {
       btn.addEventListener('click', () => {
         this.currentPage = parseInt(btn.dataset.page, 10);
-        this.performSearch();
+        this.performSearch({ pushHistory: true });
         window.scrollTo({ top: 0, behavior: 'smooth' });
       });
     });
@@ -852,14 +922,17 @@ class ArchiveVideoSearch {
   clearAllFilters() {
     if (this.collection) this.collection.value = 'all_videos';
     if (this.sortBy) this.sortBy.value = 'downloads';
-    if (this.searchInput) this.searchInput.value = '';
+    if (this.searchInput) {
+      this.searchInput.value = '';
+      if (this.clearSearchBtn) this.clearSearchBtn.style.display = 'none';
+    }
     if (this.publicDomain) this.publicDomain.checked = false;
     if (this.collectionsOnly) this.collectionsOnly.checked = false;
     this.currentPage = 1;
-    this.uiFeedback.clearResults();
-    this.uiFeedback.clearPagination();
-    this.uiFeedback.clearStats();
     UrlManager.clearUrl();
+    // Re-run the default listing rather than leaving the page empty
+    // (mirrors goHome()).
+    this.performSearch();
   }
 
   goHome() {

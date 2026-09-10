@@ -573,8 +573,7 @@
 
 /* ---- Content Below Video ---- */
 .player-content {
-  display: flex;
-  gap: 0;
+  display: block;
   max-width: 1600px;
   margin: 0 auto;
   width: 100%;
@@ -827,15 +826,14 @@
   padding-top: 10px;
 }
 
-/* ---- Playlist Sidebar ---- */
+/* ---- Playlist Sidebar ----
+   Sizing/position lives in the "Layout v3" section near the end of this
+   file; this block is only the rail's own look and internal structure. */
 .player-sidebar {
-  width: 420px;
-  flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--color-border);
+  min-width: 0;
   background: var(--color-bg-secondary);
-  max-height: none;
 }
 
 .player-sidebar-header {
@@ -905,7 +903,10 @@
 }
 
 .player-sidebar-items {
-  flex: 1;
+  flex: 1 1 auto;
+  /* Lets the list shrink below its content height inside the bounded rail
+     so it scrolls internally instead of stretching the whole page. */
+  min-height: 0;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--color-bg-elevated) transparent;
@@ -1210,17 +1211,7 @@
 }
 
 /* ---- Responsive ---- */
-@media (max-width: 1200px) {
-  .player-sidebar {
-    width: 360px;
-  }
-}
-
 @media (max-width: 1024px) {
-  .player-sidebar {
-    width: 320px;
-  }
-
   .player-content-main {
     padding: 20px 24px;
   }
@@ -1269,22 +1260,6 @@
 
   .player-logo-text {
     display: none;
-  }
-
-  .player-cinema {
-    height: auto;
-    aspect-ratio: 16 / 9;
-    margin-top: calc(52px + env(safe-area-inset-top, 0px));
-  }
-
-  .player-page.theater-mode .player-cinema {
-    height: auto;
-    aspect-ratio: 16 / 9;
-    margin-top: 0;
-  }
-
-  .player-content {
-    flex-direction: column;
   }
 
   .player-content-main {
@@ -1422,27 +1397,7 @@
     padding: 0 16px 16px;
   }
 
-  /* ---- Playlist (becomes a block below video on mobile) ---- */
-  .player-sidebar {
-    width: 100%;
-    border-left: none;
-    border-top: 1px solid var(--color-border);
-    /* Bigger playlist on mobile — 50vh was uncomfortably short for series
-       with 10+ episodes. */
-    max-height: 65vh;
-    position: static;
-  }
-
-  /* Sticky header inside the playlist so users always see episode count
-     and prev/next controls while scrolling through a long list. */
-  .player-sidebar-header {
-    position: sticky;
-    top: 0;
-    z-index: 5;
-    background: var(--color-bg-secondary);
-    padding: 14px 16px;
-  }
-
+  /* ---- Playlist (flows below the video on mobile; see Layout v3) ---- */
   .player-sidebar-items {
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
@@ -1486,6 +1441,16 @@
 @media (max-width: 480px) {
   .player-content-main {
     padding: 14px 12px calc(16px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* The pill row bleeds to the content edges; match the 12px padding above
+     (the 768px rule assumed 16px, which left a 4px horizontal overflow). */
+  .player-video-actions {
+    margin-left: -12px;
+    margin-right: -12px;
+    padding-left: 12px;
+    padding-right: 12px;
+    scroll-padding-left: 12px;
   }
 
   .player-title {
@@ -2990,4 +2955,261 @@
 }
 .comments-btn--danger:hover {
   filter: brightness(1.1);
+}
+
+/* ==============================================
+   Layout v3 — video column + sticky playlist rail
+   ==============================================
+   .player-main
+     └ .player-layout        grid: [primary] or [primary | sidebar]
+         ├ .player-primary   cinema + title/description/comments
+         │   ├ .player-cinema
+         │   └ .player-content
+         └ .player-sidebar   playlist rail (rendered only for multi-part
+                             items; PlayerPlaylist adds body.has-playlist)
+
+   Why: the rail used to be an unbounded flex column beside the description,
+   so a 100-episode series stretched the page to thousands of pixels and the
+   (viewport-tall) video scrolled away while you browsed the list. Now:
+
+   Desktop ≥1025px, playlist  → YouTube-style two columns. The rail is pinned
+                                 under the fixed header, never taller than the
+                                 viewport, and the episode list scrolls INSIDE
+                                 it. The video keeps a 16:9 box beside it.
+   Desktop, theater mode       → full-bleed cinema; the rail moves under the
+                                 video beside the description, still pinned.
+   Desktop, single video       → unchanged full-bleed cinema.
+   ≤1024px (tablet / phone)    → one column. The video is sticky under the
+                                 header so it stays in view while you scroll
+                                 the description or a long playlist; the
+                                 playlist flows in the page (no nested
+                                 scroll area to fight with on touch). */
+
+.player-page {
+  --player-header-h: 52px;
+  --player-gutter: 24px;
+  --player-sidebar-w: 400px;
+}
+
+.player-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "primary";
+  width: 100%;
+  flex: 1;
+}
+
+.player-primary {
+  grid-area: primary;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.player-sidebar {
+  grid-area: sidebar;
+}
+
+@media (max-width: 1280px) {
+  .player-page {
+    --player-sidebar-w: 360px;
+  }
+}
+
+/* ---------- Desktop: two columns ---------- */
+@media (min-width: 1025px) {
+  .player-page.has-playlist:not(.theater-mode) .player-layout {
+    grid-template-columns: minmax(0, 1fr) var(--player-sidebar-w);
+    grid-template-areas: "primary sidebar";
+    column-gap: var(--player-gutter);
+    max-width: 1800px;
+    margin: 0 auto;
+    padding: calc(var(--player-header-h) + var(--player-gutter)) var(--player-gutter) 0;
+  }
+
+  /* The header no longer floats over a black cinema here, so give it a
+     solid backdrop instead of the see-through gradient. */
+  .player-page.has-playlist:not(.theater-mode) .player-header {
+    background: rgba(0, 0, 0, 0.95);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+
+  .player-page.has-playlist:not(.theater-mode) .player-cinema {
+    height: auto;
+    aspect-ratio: 16 / 9;
+    max-height: calc(100vh - var(--player-header-h) - var(--player-gutter) * 2);
+    border-radius: var(--radius-lg);
+  }
+
+  /* The overlay bar was offset to clear the fixed header; the cinema now
+     starts below the header, so pin the bar to the frame's top edge. */
+  .player-page.has-playlist:not(.theater-mode) .player-controls-bar {
+    top: 0;
+  }
+
+  .player-page.has-playlist:not(.theater-mode) .player-content {
+    max-width: none;
+    background: transparent;
+  }
+
+  .player-page.has-playlist:not(.theater-mode) .player-content-main {
+    padding: 20px 0 32px;
+  }
+
+  .player-page.has-playlist:not(.theater-mode) .player-sidebar {
+    position: sticky;
+    top: calc(var(--player-header-h) + var(--player-gutter));
+    align-self: start;
+    max-height: calc(100vh - var(--player-header-h) - var(--player-gutter) * 2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+
+  /* Theater mode with a playlist: cinema spans both columns; the rail
+     drops beside the description and stays pinned while it scrolls. */
+  .player-page.has-playlist.theater-mode .player-layout {
+    grid-template-columns: minmax(0, 1fr) var(--player-sidebar-w);
+    grid-template-areas:
+      "cinema  cinema"
+      "content sidebar";
+    column-gap: var(--player-gutter);
+  }
+
+  .player-page.has-playlist.theater-mode .player-primary {
+    display: contents;
+  }
+
+  .player-page.has-playlist.theater-mode .player-cinema {
+    grid-area: cinema;
+  }
+
+  .player-page.has-playlist.theater-mode .player-content {
+    grid-area: content;
+    max-width: none;
+  }
+
+  .player-page.has-playlist.theater-mode .player-sidebar {
+    position: sticky;
+    top: var(--player-gutter);
+    align-self: start;
+    max-height: calc(100vh - var(--player-gutter) * 2);
+    margin: var(--player-gutter) var(--player-gutter) var(--player-gutter) 0;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+}
+
+/* ---------- Tablet + phone: one column, sticky video ---------- */
+@media (max-width: 1024px) {
+  .player-page {
+    --player-stick-top: calc(var(--player-header-h) + env(safe-area-inset-top, 0px));
+    /* Actual on-screen height of the cinema (16:9 of the full width, but
+       never more than 45% of the viewport so landscape phones keep room
+       for content underneath). Used to stack the sticky playlist header
+       directly below the video. */
+    --player-cinema-h: min(56.25vw, 45vh);
+  }
+
+  .player-page.theater-mode {
+    --player-stick-top: 0px;
+  }
+
+  .player-layout {
+    display: block;
+  }
+
+  /* Flatten the video column so the sticky cinema's containing block is
+     the whole page column (video + description + playlist). Left as a
+     real box, the cinema could only stick until the description ended
+     and would scroll away as soon as the playlist began. */
+  .player-primary {
+    display: contents;
+  }
+
+  .player-cinema {
+    height: auto;
+    aspect-ratio: 16 / 9;
+    max-height: var(--player-cinema-h);
+    margin-top: var(--player-stick-top);
+  }
+
+  .player-page.theater-mode .player-cinema {
+    height: auto;
+    aspect-ratio: 16 / 9;
+    margin-top: 0;
+  }
+
+  .player-content {
+    max-width: none;
+  }
+
+  .player-sidebar {
+    width: 100%;
+    border-top: 1px solid var(--color-border);
+  }
+
+  /* Page-flow playlist: no nested scroll area on touch. */
+  .player-sidebar-items {
+    flex: none;
+    overflow: visible;
+  }
+
+  .player-sidebar-header {
+    position: sticky;
+    top: calc(var(--player-stick-top) + var(--player-cinema-h));
+    z-index: 6;
+    box-sizing: border-box;
+    min-height: 56px;
+    padding: 0 16px;
+    background: var(--color-bg-secondary);
+  }
+
+  .player-sidebar-toolbar {
+    top: calc(var(--player-stick-top) + var(--player-cinema-h) + 56px);
+    z-index: 5;
+  }
+}
+
+/* Only pin the video when there is room under it; on a short landscape
+   viewport a pinned 16:9 frame would hide everything below it. */
+@media (max-width: 1024px) and (min-height: 560px) {
+  .player-cinema {
+    position: sticky;
+    top: var(--player-stick-top);
+    z-index: 30;
+  }
+
+  .player-page.theater-mode .player-cinema {
+    top: 0;
+  }
+}
+
+@media (max-width: 1024px) and (max-height: 559px) {
+  /* No sticky video → nothing for the playlist header to stack under. */
+  .player-sidebar-header,
+  .player-sidebar-toolbar {
+    position: static;
+  }
+}
+
+/* ---------- Phone header: make room for the actions cluster ----------
+   The centered logo is absolutely positioned, so on a narrow phone the
+   Sign in / Sign up / bookmark / collection / theme cluster slid over it.
+   The back arrow already leads home, so drop the logo, and (as the site
+   header does) keep only "Sign in" — the sign-up path is one tap further. */
+@media (max-width: 640px) {
+  .player-logo {
+    display: none;
+  }
+
+  .player-header .header-auth-link--primary {
+    display: none;
+  }
+
+  .player-header-actions {
+    gap: 4px;
+  }
 }

@@ -31,6 +31,15 @@ try {
 }
 
 $initialTheme = ($site_settings['defaultTheme'] ?? 'dark') === 'system' ? 'dark' : $site_settings['defaultTheme'];
+
+// Brand colours go inside a <style> block where HTML escaping is no
+// protection; validate as hex (guarded in case bootstrap's helper is absent).
+$brandColor = function_exists('afc_css_color')
+    ? afc_css_color((string)($site_settings['brandColor'] ?? ''), '#ff0000')
+    : (string)($site_settings['brandColor'] ?? '#ff0000');
+$accentColor = function_exists('afc_css_color')
+    ? afc_css_color((string)($site_settings['accentColor'] ?? ''), '#065fd4')
+    : (string)($site_settings['accentColor'] ?? '#065fd4');
 $currentUser = $current;
 
 function esc($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
@@ -47,12 +56,12 @@ function esc($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto:wght@400;500;600;700&display=swap" rel="stylesheet">
 
-  <link rel="stylesheet" href="styles.css">
-  <link rel="stylesheet" href="auth-styles.css">
+  <link rel="stylesheet" href="<?= esc(asset_url('styles.css')) ?>">
+  <link rel="stylesheet" href="<?= esc(asset_url('auth-styles.css')) ?>">
   <style>
     :root {
-      --brand-color: <?= esc($site_settings['brandColor']) ?>;
-      --accent-color: <?= esc($site_settings['accentColor']) ?>;
+      --brand-color: <?= esc($brandColor) ?>;
+      --accent-color: <?= esc($accentColor) ?>;
     }
   </style>
   <script>

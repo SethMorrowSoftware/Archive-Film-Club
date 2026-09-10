@@ -1,0 +1,3 @@
+# Admin view templates. Only ever `include`d by admin.php — never served
+# over HTTP (a direct hit would render a panel outside the auth gate).
+Require all denied
