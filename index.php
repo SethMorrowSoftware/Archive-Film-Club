@@ -72,6 +72,27 @@ $useVideoThumbnail = false;
 if (isset($_GET['video']) && !empty($_GET['video'])) {
     $videoId = preg_replace('/[^a-zA-Z0-9_-]/', '', $_GET['video']);
 
+    // Real browsers are bounced straight to the player. app.js would only
+    // location.replace() there anyway, so the blocking metadata fetch
+    // below (up to 2s against archive.org) bought them nothing but a
+    // slower redirect. Crawlers still get the rendered OG tags, which is
+    // what this code path exists for. Only the sanitized id plus the
+    // numeric deep-link extras app.js used to forward are carried over.
+    $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
+    $isCrawler = $ua === ''
+        || preg_match('/bot|crawl|spider|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|discordbot/i', $ua);
+    if (!empty($videoId) && !$isCrawler && !headers_sent()) {
+        $playerUrl = 'player.php?video=' . rawurlencode($videoId);
+        if (isset($_GET['track']) && ctype_digit((string)$_GET['track'])) {
+            $playerUrl .= '&track=' . (int)$_GET['track'];
+        }
+        if (isset($_GET['t']) && ctype_digit((string)$_GET['t'])) {
+            $playerUrl .= '&t=' . (int)$_GET['t'];
+        }
+        header('Location: ' . $playerUrl, true, 302);
+        exit;
+    }
+
     if (!empty($videoId)) {
         $metadata = null;
 
@@ -147,16 +168,16 @@ if (isset($_GET['video']) && !empty($_GET['video'])) {
 $protocol = is_https() ? 'https' : 'http';
 $canonicalHost = safe_host();
 
-// Normalize REQUEST_URI -- preserve `?video=` and `?q=` for canonical
-// identity, but drop ephemeral pagination so search-engine canonical URLs
-// don't fragment by page number.
+// Normalize REQUEST_URI -- preserve `?video=`, `?search=` (the app's own
+// key) and legacy `?q=` for canonical identity, but drop ephemeral
+// pagination so search-engine canonical URLs don't fragment by page number.
 $reqUri = $_SERVER['REQUEST_URI'] ?? '/';
 $reqParts = explode('?', $reqUri, 2);
 $reqPath = $reqParts[0];
 $keptQuery = '';
 if (!empty($reqParts[1])) {
     parse_str($reqParts[1], $qs);
-    $keepKeys = ['video', 'q', 'collection', 'sort', 'u', 's'];
+    $keepKeys = ['video', 'search', 'q', 'collection', 'sort', 'u', 's'];
     $kept = array_intersect_key($qs, array_flip($keepKeys));
     if ($kept) $keptQuery = '?' . http_build_query($kept);
 }
@@ -190,8 +211,18 @@ function darkenColor($hex, $percent = 20) {
     return sprintf('#%02x%02x%02x', $r, $g, $b);
 }
 
-$brandColorDark = darkenColor($site_settings['brandColor']);
-$accentColorDark = darkenColor($site_settings['accentColor']);
+// Brand colours land inside a <style> block, where htmlspecialchars() is no
+// protection (the HTML parser hands the raw text straight to the CSS
+// parser). Validate as a hex colour and fall back to the defaults. Guarded
+// so the page keeps working if bootstrap's helper isn't present.
+$brandColor = function_exists('afc_css_color')
+    ? afc_css_color((string)($site_settings['brandColor'] ?? ''), '#ff0000')
+    : (string)($site_settings['brandColor'] ?? '#ff0000');
+$accentColor = function_exists('afc_css_color')
+    ? afc_css_color((string)($site_settings['accentColor'] ?? ''), '#065fd4')
+    : (string)($site_settings['accentColor'] ?? '#065fd4');
+$brandColorDark = darkenColor($brandColor);
+$accentColorDark = darkenColor($accentColor);
 $initialTheme = $site_settings['defaultTheme'] === 'system' ? 'dark' : $site_settings['defaultTheme'];
 
 // =====================================================
@@ -331,7 +362,7 @@ if (!empty($recommendations_config['enabled']) && !empty($recommendations_config
   <?php include __DIR__ . '/partials/head-common.php'; ?>
   <title><?= escapeAttr($pageTitle) ?></title>
   <meta name="description" content="<?= escapeAttr($ogDescription) ?>" />
-  <meta name="theme-color" content="<?= escapeAttr($site_settings['brandColor']) ?>" />
+  <meta name="theme-color" content="<?= escapeAttr($brandColor) ?>" />
   <!-- Per-scheme browser chrome. The brand-color above is the fallback for
        browsers that ignore media-scoped theme-color; these match the page
        background tokens (--color-bg-primary) so light mode isn't tinted. -->
@@ -362,8 +393,8 @@ if (!empty($recommendations_config['enabled']) && !empty($recommendations_config
 
   <!-- Preload critical resources so the browser can fetch them in parallel
        with the HTML parse instead of waiting for the parser to discover them -->
-  <link rel="preload" href="styles.css" as="style">
-  <link rel="preload" href="app.js" as="script" crossorigin>
+  <link rel="preload" href="<?= escapeAttr(asset_url('styles.css')) ?>" as="style">
+  <link rel="preload" href="<?= escapeAttr(asset_url('app.js')) ?>" as="script" crossorigin>
 
   <?php
   // Preload above-the-fold thumbnails. The browser starts these requests
@@ -386,15 +417,15 @@ if (!empty($recommendations_config['enabled']) && !empty($recommendations_config
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="manifest" href="manifest.webmanifest">
 
-  <link rel="stylesheet" href="styles.css">
-  <link rel="stylesheet" href="auth-styles.css">
+  <link rel="stylesheet" href="<?= escapeAttr(asset_url('styles.css')) ?>">
+  <link rel="stylesheet" href="<?= escapeAttr(asset_url('auth-styles.css')) ?>">
 
   <!-- Custom brand colors from admin settings -->
   <style>
     :root {
-      --brand-color: <?= escapeAttr($site_settings['brandColor']) ?>;
+      --brand-color: <?= escapeAttr($brandColor) ?>;
       --brand-color-dark: <?= escapeAttr($brandColorDark) ?>;
-      --accent-color: <?= escapeAttr($site_settings['accentColor']) ?>;
+      --accent-color: <?= escapeAttr($accentColor) ?>;
       --accent-color-dark: <?= escapeAttr($accentColorDark) ?>;
     }
   </style>
@@ -562,7 +593,7 @@ if (!empty($recommendations_config['enabled']) && !empty($recommendations_config
         Reset All Filters
       </button>
 
-      <div id="searchStats" class="stats">Ready to search</div>
+      <div id="searchStats" class="stats" aria-live="polite" aria-atomic="true">Ready to search</div>
     </aside>
 
     <section class="content-area">
@@ -677,11 +708,22 @@ if (!empty($recommendations_config['enabled']) && !empty($recommendations_config
     (function() {
       var btn = document.getElementById('backToTop');
       if (!btn) return;
-      var scrollHandler = function() {
+      // Coalesce scroll events to one class toggle per frame — the raw
+      // handler ran on every scroll tick, which is dozens per frame on
+      // touch devices.
+      var ticking = false;
+      var update = function() {
+        ticking = false;
         if (window.scrollY > 480) btn.classList.add('visible');
         else btn.classList.remove('visible');
       };
+      var scrollHandler = function() {
+        if (ticking) return;
+        ticking = true;
+        window.requestAnimationFrame(update);
+      };
       window.addEventListener('scroll', scrollHandler, { passive: true });
+      update();
       btn.addEventListener('click', function() {
         window.scrollTo({ top: 0, behavior: 'smooth' });
       });
@@ -757,6 +799,6 @@ if (!empty($recommendations_config['enabled']) && !empty($recommendations_config
   })();
   </script>
 
-  <script type="module" src="app.js"></script>
+  <script type="module" src="<?= escapeAttr(asset_url('app.js')) ?>"></script>
 </body>
 </html>

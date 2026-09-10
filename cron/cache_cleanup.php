@@ -27,6 +27,42 @@ try {
     echo "  - Metadata cache entries: {$deleted['metadata']}\n";
     echo "  - Thumbnail files: {$deleted['thumbnails']}\n";
 
+    // Guest reaper. UserContext creates a `users` row for every visitor
+    // session (so guests can bookmark / keep watch progress) and nothing
+    // ever removed them, so the table grew by one row per browser session
+    // forever. Drop guests idle for 30+ days; their bookmarks, history,
+    // search history and tokens go with them via ON DELETE CASCADE. Batched
+    // so a first run on a big table doesn't hold one giant lock. Bounded by
+    // an upper batch count so a runaway table can't pin the cron open.
+    $guestRetentionDays = 30;
+    $batchSize = 1000;
+    $maxBatches = 200;
+    $reaped = 0;
+    try {
+        $db = Database::getInstance();
+        for ($i = 0; $i < $maxBatches; $i++) {
+            // LIMIT is interpolated (never bound — see MaintenanceService's
+            // note on native prepares) and both values are trusted ints.
+            $stmt = $db->query(
+                "DELETE FROM users
+                 WHERE is_guest = 1
+                   AND last_seen < DATE_SUB(NOW(), INTERVAL " . (int)$guestRetentionDays . " DAY)
+                 LIMIT " . (int)$batchSize
+            );
+            $n = $stmt->rowCount();
+            $reaped += $n;
+            if ($n < $batchSize) {
+                break;
+            }
+        }
+        echo "  - Idle guest users (>{$guestRetentionDays}d): {$reaped}\n";
+    } catch (Throwable $e) {
+        // users.is_guest arrives with migration 003; before that there is
+        // nothing to reap. Log and carry on with the stats below.
+        echo "  - Idle guest users: skipped (" . $e->getMessage() . ")\n";
+        error_log('[cache_cleanup] guest reaper: ' . $e->getMessage());
+    }
+
     // Get current stats
     $stats = $cacheManager->getStats();
     echo "\nCurrent Cache Stats:\n";

@@ -20,53 +20,53 @@
 
             <div class="admin-content">
                 <!-- Dashboard Panel -->
-                <div class="panel active" id="panel-dashboard">
+                <div class="panel active" id="panel-dashboard" role="tabpanel" aria-labelledby="tab-dashboard">
                     <?php include __DIR__ . '/panels/dashboard.php'; ?>
                 </div>
 
                 <!-- Staff Picks Panel -->
-                <div class="panel" id="panel-staff-picks">
+                <div class="panel" id="panel-staff-picks" role="tabpanel" aria-labelledby="tab-staff-picks">
                     <?php include __DIR__ . '/panels/staff-picks.php'; ?>
                 </div>
 
                 <!-- Site Settings Panel -->
-                <div class="panel" id="panel-site-settings">
+                <div class="panel" id="panel-site-settings" role="tabpanel" aria-labelledby="tab-site-settings">
                     <?php include __DIR__ . '/panels/site-settings.php'; ?>
                 </div>
 
                 <!-- Appearance Panel -->
-                <div class="panel" id="panel-appearance">
+                <div class="panel" id="panel-appearance" role="tabpanel" aria-labelledby="tab-appearance">
                     <?php include __DIR__ . '/panels/appearance.php'; ?>
                 </div>
 
                 <!-- Display Options Panel -->
-                <div class="panel" id="panel-display">
+                <div class="panel" id="panel-display" role="tabpanel" aria-labelledby="tab-display">
                     <?php include __DIR__ . '/panels/display.php'; ?>
                 </div>
 
                 <!-- Featured Sections Panel -->
-                <div class="panel" id="panel-sections">
+                <div class="panel" id="panel-sections" role="tabpanel" aria-labelledby="tab-sections">
                     <?php include __DIR__ . '/panels/sections.php'; ?>
                 </div>
 
                 <!-- Metrics Panel -->
-                <div class="panel" id="panel-metrics">
+                <div class="panel" id="panel-metrics" role="tabpanel" aria-labelledby="tab-metrics">
                     <?php include __DIR__ . '/panels/metrics.php'; ?>
                 </div>
 
                 <!-- Users Panel -->
-                <div class="panel" id="panel-users">
+                <div class="panel" id="panel-users" role="tabpanel" aria-labelledby="tab-users">
                     <?php include __DIR__ . '/panels/users.php'; ?>
                 </div>
 
                 <!-- Comments Moderation Panel -->
-                <div class="panel" id="panel-comments-mod">
+                <div class="panel" id="panel-comments-mod" role="tabpanel" aria-labelledby="tab-comments-mod">
                     <?php include __DIR__ . '/panels/comments-mod.php'; ?>
                 </div>
 
                 <?php if (!empty($canMaintain)): ?>
                 <!-- Maintenance / Database Panel (full admins only) -->
-                <div class="panel" id="panel-maintenance">
+                <div class="panel" id="panel-maintenance" role="tabpanel" aria-labelledby="tab-maintenance">
                     <?php include __DIR__ . '/panels/maintenance.php'; ?>
                 </div>
                 <?php endif; ?>

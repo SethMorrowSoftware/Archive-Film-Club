@@ -54,7 +54,31 @@ class SettingsService {
             error_log("Failed to load settings: " . $e->getMessage());
         }
 
+        // The two colors are interpolated into inline <style> blocks by every
+        // page. The API validates them on write, but a row written any other
+        // way (install.php JSON import, a restore, a manual UPDATE) is not
+        // covered, so sanitize on the way OUT too — every consumer is then
+        // safe regardless of what the table holds.
+        foreach (['brandColor', 'accentColor'] as $colorKey) {
+            $settings[$colorKey] = self::safeCssColor(
+                (string)($settings[$colorKey] ?? ''),
+                (string)$this->defaults[$colorKey]
+            );
+        }
+
         return $settings;
+    }
+
+    /**
+     * Hex-color-or-fallback. Uses bootstrap.php's afc_css_color() when the
+     * app is bootstrapped; the cron scripts load this class directly, so the
+     * same rule is inlined as a fallback.
+     */
+    private static function safeCssColor(string $value, string $fallback): string {
+        if (function_exists('afc_css_color')) {
+            return afc_css_color($value, $fallback);
+        }
+        return preg_match('/^#[0-9a-f]{3,8}$/i', $value) ? $value : $fallback;
     }
 
     /**

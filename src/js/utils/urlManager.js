@@ -16,7 +16,10 @@ export class UrlManager {
       }
     });
 
-    if (usePushState) {
+    // Pushing a URL identical to the current one just adds a no-op Back
+    // stop (submit the same query twice, click the current page number).
+    // Collapse that to a replace so history only grows on real changes.
+    if (usePushState && url.href !== window.location.href) {
       window.history.pushState({}, '', url);
     } else {
       window.history.replaceState({}, '', url);
@@ -57,7 +60,10 @@ export class UrlManager {
       // URLSearchParams.get() already returns a decoded value — decoding it
       // again throws URIError on any literal '%' and corrupts '+' sequences.
       // `|| null` preserves the previous "absent/empty → null" contract.
-      search: params.get('search') || null,
+      // `q` is accepted as a fallback: the player's topic tags and older
+      // shared links use index.php?q=..., and index.php's canonical URL
+      // keeps both keys.
+      search: params.get('search') || params.get('q') || null,
       collection: params.get('collection'),
       page: params.get('page') ? parseInt(params.get('page'), 10) : 1
     };
@@ -100,7 +106,7 @@ export class UrlManager {
    */
   static hasSearchParams() {
     const params = this.getParams();
-    return params.has('search') || params.has('collection');
+    return params.has('search') || params.has('q') || params.has('collection');
   }
 }
 

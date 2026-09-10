@@ -59,3 +59,33 @@ jobs:
 
       - name: Check all JS files (ESM-aware node --check)
         run: bash scripts/check-syntax.sh js
+
+  browser:
+    name: Player browser regression (Chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: none
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Playwright is NOT a project dependency (package.json is Electron-only);
+      # install it for this job alone, pinned, without touching the lockfile.
+      - name: Install Playwright Chromium
+        run: |
+          npm i --no-save --no-audit --no-fund playwright@1.47.2
+          npx playwright install --with-deps chromium
+
+      # The test starts its own `php -S` from the repo root and mocks
+      # archive.org + the local API at the network layer, so no DB is needed.
+      - name: Run player regression test
+        run: node tests/browser/player.test.js

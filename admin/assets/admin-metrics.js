@@ -208,6 +208,7 @@
         loaded: false,
         currentMetric: 'signups',
         currentRange: 30,
+        lastSeries: null, // last rendered series, for redraws on resize
     };
 
     async function loadMetrics() {
@@ -243,11 +244,13 @@
 
             if (total === 0) {
                 svg.innerHTML = '';
+                metrics.lastSeries = null;
                 emptyEl.style.display = '';
                 summaryEl.innerHTML = '';
                 return;
             }
             emptyEl.style.display = 'none';
+            metrics.lastSeries = series;
             renderLineChart(svg, series);
             summaryEl.innerHTML = `
                 <div class="metrics-summary-stat"><span class="metrics-summary-label">Total</span><span class="metrics-summary-value">${formatCount(total)}</span></div>
@@ -256,6 +259,7 @@
             `;
         } catch (err) {
             svg.innerHTML = '';
+            metrics.lastSeries = null;
             emptyEl.textContent = 'Couldn’t load chart data.';
             emptyEl.style.display = '';
             summaryEl.innerHTML = '';
@@ -263,8 +267,13 @@
     }
 
     function renderLineChart(svg, points) {
-        // viewBox = 0 0 600 220; padding for axis labels
-        const W = 600, H = 220, padL = 36, padR = 12, padT = 16, padB = 28;
+        // Size the drawing to the SVG's real pixel box so one user unit is one
+        // CSS pixel and the axis text is never stretched (the chart used to be
+        // scaled with preserveAspectRatio="none"). Falls back to 600x220 when
+        // the panel is hidden; redrawChart() repaints once it is visible.
+        const W = svg.clientWidth || 600, H = svg.clientHeight || 220;
+        svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+        const padL = 36, padR = 12, padT = 16, padB = 28;
         const w = W - padL - padR, h = H - padT - padB;
         const maxY = Math.max(1, ...points.map(p => p.count));
         // round up to a nice gridline number
@@ -728,9 +737,23 @@
     let lastDashboardLoad = 0;
     const DASHBOARD_TTL_MS = 60_000;
 
+    // Redraw the chart at its current pixel size after a resize (debounced)
+    // and when the metrics panel is shown again (it may have been resized
+    // while hidden, when clientWidth was 0).
+    function redrawChart() {
+        const svg = document.getElementById('metricsChart');
+        if (svg && metrics.lastSeries && svg.clientWidth) renderLineChart(svg, metrics.lastSeries);
+    }
+    let chartResizeTimer = null;
+    window.addEventListener('resize', () => {
+        clearTimeout(chartResizeTimer);
+        chartResizeTimer = setTimeout(redrawChart, 150);
+    });
+
     document.addEventListener('admin:panel-shown', (e) => {
         const panel = e.detail;
         if (panel === 'metrics' && !metrics.loaded) loadMetrics();
+        else if (panel === 'metrics') requestAnimationFrame(redrawChart);
         if (panel === 'users' && !usersState.loaded) loadUsers();
         if (panel === 'comments-mod' && !modState.loaded) loadCommentsMod();
         if (panel === 'dashboard') {

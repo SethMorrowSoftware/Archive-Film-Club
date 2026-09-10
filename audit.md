@@ -455,3 +455,145 @@ focus returns to the opener on close.
 > take a backup while browsing the site, restore it, and run two restores
 > concurrently to see the 409/busy path.
 
+
+
+---
+
+# Pass 3 — 2026-09-10: player rework + full re-audit
+
+**Trigger:** two user-reported player bugs — (1) *"long playlists are very long
+scrolls back to the top to actually view"* and (2) *"clicking the video to pause
+is only briefly effective and then the video continues"* — plus a request for a
+full UI + backend re-audit while keeping the app an easy shared-cPanel install.
+
+**Method:** the player was diagnosed empirically in the bundled Chromium
+(Playwright) before any code changed; the rest of the codebase was re-read by
+three parallel read-only audits (backend PHP, homepage/SW, admin/Electron),
+each finding was re-verified against the code, then fixed by area with
+non-overlapping file ownership. Everything below marked **[verified]** was
+confirmed by tracing the code path or by an in-browser check.
+
+## A. The two reported bugs
+
+### A1. Click-to-pause "only briefly effective" — root cause **[verified in Chromium]**
+`player.js` attached its own `click` handler to the `<video>` that toggled
+play/pause. Every modern engine already toggles play/pause when a
+`<video controls>` element is clicked, so one click produced **two** toggles:
+`pause@0.32s` then `play@0.32s` in the media event log. The video paused for a
+frame and resumed.
+
+A second, related defect made the keyboard misbehave the same way: clicking the
+video gives it focus, and the browser's native controls then handle Space and
+the arrow keys themselves. The page-level `document` keydown handler ran too, so
+Space paused-then-resumed and ←/→ seeked 10 s instead of 5 s. A document-level
+`preventDefault()` does **not** stop the native handling (measured), but a
+capture-phase listener on the element does.
+
+**Fix:** removed the page-level click toggle entirely (native controls own it);
+the shortcut handler now returns whether it consumed the key, and a
+capture-phase `keydown` listener on the `<video>` routes to it and calls
+`stopImmediatePropagation()` when it did, so each key acts exactly once
+regardless of focus. Buttons the player owns blur after a mouse click so Space
+pauses instead of re-firing "Next episode". Modifier chords (Ctrl+F, Cmd+L…) are
+no longer hijacked — `f` used to enter fullscreen on Ctrl+F.
+
+### A2. Long playlists stretch the page — root cause **[verified]**
+The playlist `<aside>` was a flex column inside the content row with
+`max-height: none`; `.player-sidebar-items` had `overflow-y: auto` but no
+bounded height, so a 100-episode item rendered 100 rows tall and the
+viewport-height cinema scrolled off the top while you browsed.
+
+**Fix — layout v3** (`player.php`, `player-styles.css`, `PlayerPlaylist.js`):
+- Desktop ≥1025 px with a playlist: YouTube-style two-column grid. The rail is
+  `position: sticky` under the fixed header, capped at viewport height, and the
+  episode list scrolls **inside** it. The video keeps a 16:9 box beside it.
+  `body.has-playlist` is toggled by `PlayerPlaylist.show()/hide()`.
+- Theater mode with a playlist: full-bleed cinema, rail pinned beside the
+  description below (`.player-primary { display: contents }` so the grid can
+  place cinema / content / rail directly).
+- Single videos: unchanged full-bleed cinema.
+- ≤1024 px: one column; the video is sticky under the header (only when the
+  viewport is ≥560 px tall — a pinned 16:9 frame would cover a landscape
+  phone), the playlist flows in the page (no nested touch scroller), and the
+  playlist header + filter bar dock under the video. The video column is
+  flattened with `display: contents` so the sticky frame's containing block
+  spans the whole page, not just the description.
+- Active-episode reveal nudges the rail's own `scrollTop` on desktop and the
+  window on phones — but only when the list is already on screen, never on
+  first paint.
+- Pre-existing: the phone header's centred logo overlapped "Sign up" (hidden
+  ≤640 px, sign-up collapses like the site header does); a 4 px horizontal
+  overflow at ≤480 px from the action-pill row's bleed margins.
+
+### A3. Player polish shipped alongside
+- Per-episode **quality picker** for series (was single-video only); the
+  remembered tier is applied to each episode.
+- **Series resume:** the episode index is saved with the item's progress, so a
+  return visit (or Continue Watching) lands on the last-watched episode and
+  offers to resume its position; per-episode resume prompt on track change.
+- `?t=` deep links seek on `loadedmetadata` (the 300 ms timer raced the load).
+- Resume prompts only for positions >10 s and <95 %, and server progress is
+  merged in for signed-in viewers; progress is never saved for
+  infinite-duration sources.
+- `document.title` follows the episode; Media Session metadata + handlers
+  (lock screen / hardware keys: play, pause, seek, prev/next).
+- Navigating from a series to a single video now hides the rail.
+
+### A4. Verification
+`tests/browser/player.test.js` (new, run in CI) drives the real page in
+Chromium with archive.org + the local API mocked: 31 checks covering A1, A2,
+A3 at 1440×900, 390×844 and 740×360. All pass.
+
+## B. Backend findings fixed **[all verified]**
+
+| # | Sev | Finding | Fix |
+|---|---|---|---|
+| B1 | **Critical** | Migration 007 broke every fresh install: 006 names `fk_video_comments_user`, so 007's `DROP FOREIGN KEY video_comments_ibfk_1` removed the reply-cascade FK and the following `ADD CONSTRAINT` failed with an unswallowed duplicate-name error → installer stopped at step 2. | 006 names both FKs; 007 rewritten name-agnostic + idempotent via `information_schema` lookups and `PREPARE/EXECUTE` (also repairs installs that lost the parent FK). Both runners use the quote/comment-aware `splitSqlStatements()` and `Database::exec()` (PREPARE is refused by the server-side prepared-statement protocol `query()` uses); shared, extended swallow list. Smoke test asserts the split. |
+| B2 | High | Break-glass admin session (`ADMIN_PASSWORD`, DB down) could log in but every save 401'd; a dead DB 500'd instead of 401. | `ApiController::currentUser()` wraps DB lookups, recognises the break-glass session as a synthetic admin (rejected by `requireAuth`, admitted by `requireAdmin`); settings/sections/recommendations construct `SettingsService` lazily so the JSON recovery files are reachable. |
+| B3 | High | `api/metadata-batch.php` opened up to 50 concurrent archive.org fetches per anonymous request. | ≤5 uncached fetched synchronously, rest queued. |
+| B4 | High | Break-glass password check had no throttle. | File-backed per-IP throttle (5 fails → 15 min), DB-independent. |
+| B5 | Medium | `install.php` escaped `"`/`\` in `.env`; the two loaders never unescaped → passwords with those characters broke every request after install. | Both loaders unescape double-quoted values; `db/config.php` no longer clobbers real env vars. |
+| B6 | Medium | `search_history` was never written (recent searches + 3 admin metrics permanently empty). | Recorded in `api/search.php` (page 1, non-fatal). |
+| B7 | Medium | Admin "Top videos" selected a non-existent `h.title` column (always empty, error swallowed). | Joins `video_metadata_cache`; every swallowing catch in `MetricsService` now logs. |
+| B8 | Medium | `/api/metadata.php` shape differed on cache hit vs miss (`licenseurl` vs `license_url`, internal columns leaked) — the licence badge vanished on the second view. | `CacheManager::normalizeMetadataRow()` applied in both metadata endpoints. |
+| B9 | Medium | `ThumbnailCache::downloadImage()` (cron + queue path) lacked the size caps `api/thumbnail.php` got in F7. | Same 10 MB caps + post-check before GD. |
+| B10 | Medium | A `users` row per visitor session, never cleaned; crawlers inflate it unboundedly. | Cron reaper (30-day idle guests, batched); crawler UAs get a transient in-memory guest and every write path no-ops for it. |
+| B11 | Medium | Remember-me auto-login didn't regenerate the session or rotate the token. | `session_regenerate_id(true)` + CSRF rotation + single-use rolling tokens. |
+| B12 | Medium | `LocalStorageService::httpGet()` used only `file_get_contents` (dead on `allow_url_fopen=Off` hosts) with no size cap. | Delegates to the hardened cURL-first fetcher. |
+| B13 | Medium | `api/cache.php` `cache_immediate`/`cache_single` (synchronous upstream fetches) were open to anyone. | Per-session budget (25 items / 10 min → 429). |
+| B14 | Medium | Settings POST reset every omitted key to its default; editors could rebrand the site (and change the type-to-confirm phrase); `diagnose.php` and member e-mails were editor-visible. | Partial updates; settings POST + diagnose + e-mail column are full-admin only; public GET projected through the allow-list. |
+| B15 | Medium | `hasAdminUsers()` on a dropped legacy table pushed a healthy install into JSON-fallback mode. | Isolated try/catch. |
+| B16 | Low | `.git/` was web-readable (basename-only dotfile rule); `admin/views/` + `admin/controllers/` served directly; `admin.php` JSON lacked `JSON_HEX_TAG`; replies under hidden threads readable; 3 writes per stale-metadata read; brand colours unvalidated at render time. | `.htaccess` denies; `JSON_HEX_*`; parent-visibility join; skip re-mark when already stale; `afc_css_color()` guard in every page template and in `SettingsService`. |
+
+## C. Homepage / service-worker findings fixed **[all verified]**
+
+- **H1** Back-button trap: every search `pushState`'d and `popstate` pushed again. Typing/filters now `replaceState`, explicit navigations push, popstate replays without writing the URL. Browser-checked: two Backs leave the site.
+- **H2** Header search form submitted `q`, which nothing read; both `search` and `q` now work.
+- **H3** Stored XSS: featured-section ids landed unescaped in an inline `onclick`; replaced with escaped `data-*` + a delegated listener.
+- **H4** `sanitizeHtml()` cleaned *after* parsing on a live node (img `onerror` fired) with a leaky deny-list; rewritten as a `DOMParser` allow-list.
+- **H5** SW cached per-user HTML (account/collections) into an untrimmed static cache; path/`Cache-Control` aware now, trimmed, version bumped.
+- **H6** New HTML + week-old JS/CSS after deploys: `asset_url()` cache-busting on every page; SW precache with `cache: 'reload'`.
+- **H7** Guest bookmarks were lost on login and the previous user's list survived logout; guests now sync to the API, pulls merge, logout clears.
+- **M1–M14 / L1–L12** Reset-filters left an empty page; saved sort/collection prefs were overwritten; card rows keyboard-inoperable (now real links); invisible-but-tappable remove/action buttons on touch; no live-region announcements; `AuthNav` leaked document listeners and flashed "Sign in"; uncapped N+1 metadata fan-out; Hide/Show label never updated; dynamic cache never trimmed; sort control dead on the default view; search history polluted by partial queries; modals without focus traps (shared `focusTrap.js`); bookmark icons stale after server pull; thumbnail `onerror` wiped sibling badges; SW dead paths; unthrottled scroll handler; unused services; stale results at 1–2 chars; `display:contents` link; manifest orientation lock; 4 px layout constant; `:has()` dependency; blocking archive.org fetch on `index.php?video=` (now a 302 for non-crawlers); pagination `aria-current`.
+
+## D. Admin panel / Electron findings fixed **[all verified]**
+
+- **H1** Stored XSS in the admin panel: `escapeHtml()` didn't escape quotes but fed `alt="…"`/`value="…"` — an archive.org title could execute in an admin's session (CSP permits inline handlers). Helper now escapes all five characters; ids escaped everywhere.
+- **M3–M11, L1–L6, L15** Save button shown on unsaveable panels and a permanently lit "unsaved" dot; section-search modal had no pagination; cancelled new sections were persisted; drag-and-drop listeners stacked per render; no unsaved-changes guard; dead per-form status divs; toast rendered messages as HTML; non-wrapping headers on phones; stretched SVG axis labels; modal focus management; inert sticky table header; missing focus rings; tab ARIA; confirm before removing a pick.
+- **Electron H2** Unauthenticated settings write reached an inline `<script>` and raw JSON island (persistent code execution in the desktop app): allow-list validation on write *and* read, `'` escaped, `<`/U+2028/9 escaped in JSON, CSP meta.
+- **Electron H3** The desktop app couldn't play anything (its denylist 404'd `player.php`): a `/player.php` route now renders the player page; other PHP pages get a friendly "not available in the desktop app" page.
+- **L8–L10, L16** Server never closed on quit; navigation/window-open guards + sandbox; denylist gaps (`.md`, JSON config files, `tests/`, `scripts/`, `partials/`); unbounded redirect recursion; `electron` moved to devDependencies (lockfile regenerated).
+
+## E. Not done / accepted
+
+- Admin panel stays dark-only (a light palette needs ~40 hard-coded colours reworked — out of scope for a safe pass).
+- The CSP still carries `'unsafe-inline'` (admin inline handlers, brand-colour `<style>` blocks). Removing it is a separate refactor.
+- No live MySQL/Apache was available in this environment: SQL and `.htaccess` changes were reviewed for MySQL 5.7/8 + MariaDB 10.2 and Apache 2.4 syntax but not executed against a server. Recommended manual check after deploy: run the installer on an empty database (exercises the new migration 007), then *System → Maintenance → Run migrations* once more (idempotency).
+- `node-fetch` remains an unused Electron dependency.
+
+## F. Verification
+`bash scripts/check-syntax.sh all` (86 PHP, 38 JS files), `php tests/smoke.php`
+(incl. the new migration-splitter and colour-guard cases), the new
+`tests/browser/player.test.js` (31/31), and a homepage Chromium check (results,
+no horizontal overflow at 390 px, Back-button behaviour, zero page errors) all
+pass.

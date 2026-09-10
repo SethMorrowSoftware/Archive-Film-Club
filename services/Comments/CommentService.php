@@ -122,11 +122,19 @@ class CommentService {
      * Get additional replies for a single thread (used by "show more replies").
      */
     public function listReplies(int $parentId, int $afterId = 0): array {
+        // The parent must itself be shown. listForVideo() never emits a
+        // moderator-hidden top-level comment (nor its first page of
+        // replies), so this endpoint must not hand them out either when
+        // called with a guessed/remembered parent id. Soft-deleted parents
+        // stay: they still render (as "[deleted]") with their thread, which
+        // is the whole point of soft delete. Enforced with an inner JOIN on
+        // the parent row so it is a single query.
         $rows = $this->db->fetchAll(
             "SELECT c.id, c.user_id, c.parent_id, c.body, c.status,
                     c.like_count, c.edited_at, c.created_at,
                     u.username, u.display_name, u.role
              FROM video_comments c
+             JOIN video_comments p ON p.id = c.parent_id AND p.status <> 'hidden'
              LEFT JOIN users u ON u.id = c.user_id
              WHERE c.parent_id = ? AND c.id > ? AND c.status <> 'hidden'
              ORDER BY c.created_at ASC

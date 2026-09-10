@@ -74,6 +74,15 @@ try {
 
 $initialTheme = ($site_settings['defaultTheme'] ?? 'dark') === 'system' ? 'dark' : $site_settings['defaultTheme'];
 
+// Brand colours go inside a <style> block where HTML escaping is no
+// protection; validate as hex (guarded in case bootstrap's helper is absent).
+$brandColor = function_exists('afc_css_color')
+    ? afc_css_color((string)($site_settings['brandColor'] ?? ''), '#ff0000')
+    : (string)($site_settings['brandColor'] ?? '#ff0000');
+$accentColor = function_exists('afc_css_color')
+    ? afc_css_color((string)($site_settings['accentColor'] ?? ''), '#065fd4')
+    : (string)($site_settings['accentColor'] ?? '#065fd4');
+
 function esc($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 
 $pageTitle = $collection
@@ -104,12 +113,12 @@ $ogDescription = $collection && $collection['description']
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto:wght@400;500;600;700&display=swap" rel="stylesheet">
 
-  <link rel="stylesheet" href="styles.css">
-  <link rel="stylesheet" href="auth-styles.css">
+  <link rel="stylesheet" href="<?= esc(asset_url('styles.css')) ?>">
+  <link rel="stylesheet" href="<?= esc(asset_url('auth-styles.css')) ?>">
   <style>
     :root {
-      --brand-color: <?= esc($site_settings['brandColor']) ?>;
-      --accent-color: <?= esc($site_settings['accentColor']) ?>;
+      --brand-color: <?= esc($brandColor) ?>;
+      --accent-color: <?= esc($accentColor) ?>;
     }
   </style>
   <script>
@@ -204,8 +213,14 @@ $ogDescription = $collection && $collection['description']
               }
               $playerUrl = 'player.php?video=' . urlencode($item['id']);
             ?>
-            <div class="collection-card" style="cursor:default;">
-              <a href="<?= esc($playerUrl) ?>" style="display:contents;">
+            <?php
+              // The <a> IS the card (display:contents on a link drops it
+              // from some accessibility trees). In owner mode a wrapper
+              // carries the Remove button alongside, since a button can't
+              // sit inside a link.
+            ?>
+            <div class="collection-card-item">
+              <a class="collection-card" href="<?= esc($playerUrl) ?>">
                 <div class="collection-card-cover" data-cover="<?= esc($thumbnail) ?>"></div>
                 <div class="collection-card-body">
                   <h3 class="collection-card-name"><?= esc($item['title'] ?: $item['id']) ?></h3>
@@ -215,8 +230,7 @@ $ogDescription = $collection && $collection['description']
                 </div>
               </a>
               <?php if ($ownerMode): ?>
-                <button type="button" class="btn btn-ghost"
-                        style="margin:var(--space-2); align-self:flex-end;"
+                <button type="button" class="btn btn-ghost collection-card-remove"
                         data-remove-item
                         data-archive-id="<?= esc($item['id']) ?>">
                   Remove
@@ -250,6 +264,7 @@ $ogDescription = $collection && $collection['description']
   <script type="module">
     import { CollectionService } from './src/js/services/CollectionService.js';
     import { Toast } from './src/js/components/Toast.js';
+    import { trapFocus } from './src/js/utils/focusTrap.js';
 
     const COLLECTION_ID = <?= (int)$collection['id'] ?>;
     const OWNER_MODE = <?= $ownerMode ? 'true' : 'false' ?>;
@@ -263,13 +278,30 @@ $ogDescription = $collection && $collection['description']
         : null, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 
     // ---- Modal helpers (replacement for alert/confirm/prompt) ----
-    function buildModal(html) {
+    // buildModal wires the focus trap (Tab cycling, scroll lock, focus
+    // restore) and the Escape listener, and hands back overlay.destroy()
+    // which tears ALL of it down. Every close path must go through
+    // destroy(): the Escape listener used to be removed only when Escape
+    // itself was the exit, so each button/backdrop close leaked one.
+    function buildModal(html, { initialFocus = null, onEscape = null } = {}) {
       const overlay = document.createElement('div');
       overlay.className = 'afc-modal';
       overlay.setAttribute('role', 'dialog');
       overlay.setAttribute('aria-modal', 'true');
       overlay.innerHTML = `<div class="afc-modal-card" tabindex="-1">${html}</div>`;
       document.body.appendChild(overlay);
+
+      const release = trapFocus(overlay, {
+        initialFocus: initialFocus ? overlay.querySelector(initialFocus) : null,
+      });
+      const onKey = (e) => { if (e.key === 'Escape' && onEscape) onEscape(); };
+      document.addEventListener('keydown', onKey);
+
+      overlay.destroy = () => {
+        document.removeEventListener('keydown', onKey);
+        release();
+        overlay.remove();
+      };
       return overlay;
     }
 
@@ -288,15 +320,11 @@ $ogDescription = $collection && $collection['description']
             <button type="button" class="btn btn-secondary" data-cancel>${escapeHtml(cancelLabel)}</button>
             <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-confirm>${escapeHtml(confirmLabel)}</button>
           </div>
-        `);
-        const close = (val) => { overlay.remove(); resolve(val); };
+        `, { initialFocus: '[data-confirm]', onEscape: () => close(false) });
+        const close = (val) => { overlay.destroy(); resolve(val); };
         overlay.querySelector('[data-confirm]').addEventListener('click', () => close(true));
         overlay.querySelector('[data-cancel]').addEventListener('click', () => close(false));
         overlay.addEventListener('click', e => { if (e.target === overlay) close(false); });
-        document.addEventListener('keydown', function onKey(e) {
-          if (e.key === 'Escape') { document.removeEventListener('keydown', onKey); close(false); }
-        });
-        overlay.querySelector('[data-confirm]').focus();
       });
     }
 
@@ -314,10 +342,10 @@ $ogDescription = $collection && $collection['description']
             <button type="button" class="btn btn-secondary" data-cancel>Cancel</button>
             <button type="button" class="btn btn-primary" data-save>Save changes</button>
           </div>
-        `);
+        `, { initialFocus: '#afcEditName', onEscape: () => close(null) });
         const nameInput = overlay.querySelector('#afcEditName');
         const publicInput = overlay.querySelector('#afcEditPublic');
-        const close = (val) => { overlay.remove(); resolve(val); };
+        const close = (val) => { overlay.destroy(); resolve(val); };
         overlay.querySelector('[data-save]').addEventListener('click', () => {
           const newName = nameInput.value.trim();
           if (!newName) {
@@ -329,9 +357,6 @@ $ogDescription = $collection && $collection['description']
         });
         overlay.querySelector('[data-cancel]').addEventListener('click', () => close(null));
         overlay.addEventListener('click', e => { if (e.target === overlay) close(null); });
-        document.addEventListener('keydown', function onKey(e) {
-          if (e.key === 'Escape') { document.removeEventListener('keydown', onKey); close(null); }
-        });
         setTimeout(() => { nameInput.focus(); nameInput.select(); }, 0);
       });
     }
@@ -344,15 +369,10 @@ $ogDescription = $collection && $collection['description']
         <div class="afc-modal-actions">
           <button type="button" class="btn btn-primary" data-close>Close</button>
         </div>
-      `);
-      const input = overlay.querySelector('input');
-      input.focus();
-      input.select();
-      overlay.querySelector('[data-close]').addEventListener('click', () => overlay.remove());
-      overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-      document.addEventListener('keydown', function onKey(e) {
-        if (e.key === 'Escape') { document.removeEventListener('keydown', onKey); overlay.remove(); }
-      });
+      `, { initialFocus: 'input', onEscape: () => overlay.destroy() });
+      overlay.querySelector('input').select();
+      overlay.querySelector('[data-close]').addEventListener('click', () => overlay.destroy());
+      overlay.addEventListener('click', e => { if (e.target === overlay) overlay.destroy(); });
     }
 
     // ---- Share button ----

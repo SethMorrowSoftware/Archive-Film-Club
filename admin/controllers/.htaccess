@@ -1,0 +1,2 @@
+# Admin controller code. Only ever required by admin.php; never served over HTTP.
+Require all denied

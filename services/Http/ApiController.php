@@ -163,30 +163,67 @@ class ApiController {
 
     /**
      * Return the currently authenticated user (of any role) or null.
-     * Prefers the new unified UserAuthService; falls back to legacy admin session.
+     * Prefers the new unified UserAuthService; falls back to legacy admin
+     * session; finally recognizes the break-glass (ADMIN_PASSWORD in .env)
+     * admin session that admin.php establishes when the database is down.
+     *
+     * Every DB-backed lookup is wrapped: a dead database, or a users table
+     * that hasn't been migrated yet, must degrade to "not signed in" (so the
+     * caller answers 401) rather than escape as an uncaught exception (500).
+     * It also has to keep going so the break-glass check below still runs
+     * while the DB is unreachable — that is the only time it matters.
      */
     public function currentUser(): ?array {
-        if (class_exists('UserAuthService')) {
-            $auth = new UserAuthService();
-            $user = $auth->currentUser();
-            if ($user) return $user;
+        try {
+            if (class_exists('UserAuthService')) {
+                $auth = new UserAuthService();
+                $user = $auth->currentUser();
+                if ($user) return $user;
+            }
+        } catch (\Throwable $e) {
+            error_log('[ApiController::currentUser] user lookup failed: ' . $e->getMessage());
         }
 
         // Legacy admin session fallback (pre-unified-users migration)
-        if (class_exists('AdminAuthService')) {
-            $auth = new AdminAuthService();
-            return $auth->validateSession();
+        try {
+            if (class_exists('AdminAuthService')) {
+                $auth = new AdminAuthService();
+                $user = $auth->validateSession();
+                if ($user) return $user;
+            }
+        } catch (\Throwable $e) {
+            error_log('[ApiController::currentUser] admin lookup failed: ' . $e->getMessage());
+        }
+
+        // Break-glass session. AdminBootstrap sets this flag (and nothing
+        // else) after a successful ADMIN_PASSWORD login in JSON-fallback mode.
+        // There is no users row behind it, so it's a synthetic admin with
+        // id 0: enough for the admin-only endpoints whose JSON recovery
+        // files are the whole point of that mode. `break_glass` lets
+        // endpoints that need a real account (requireAuth) or a live DB
+        // (api/admin/maintenance.php) refuse it explicitly.
+        if (isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true) {
+            return [
+                'id' => 0,
+                'username' => 'admin',
+                'role' => 'admin',
+                'is_guest' => 0,
+                'break_glass' => true,
+            ];
         }
 
         return null;
     }
 
     /**
-     * Require an authenticated user of any role. Exits 401 if not logged in.
+     * Require an authenticated ACCOUNT of any role. Exits 401 if not logged
+     * in. The break-glass admin is not an account (no users row to own
+     * collections, bookmarks, a password...), so it is rejected here and
+     * only admitted by requireAdmin().
      */
     public function requireAuth(): array {
         $user = $this->currentUser();
-        if (!$user) {
+        if (!$user || !empty($user['break_glass'])) {
             $this->error('Authentication required', 401);
         }
         return $user;
@@ -194,9 +231,14 @@ class ApiController {
 
     /**
      * Require an admin user (role = 'admin' or 'editor'). Exits 401/403.
+     * Callers that need a FULL admin, or a live database, must check
+     * `role === 'admin'` / `empty($user['break_glass'])` themselves.
      */
     public function requireAdmin(): array {
-        $user = $this->requireAuth();
+        $user = $this->currentUser();
+        if (!$user) {
+            $this->error('Authentication required', 401);
+        }
         $role = $user['role'] ?? null;
         if ($role !== 'admin' && $role !== 'editor') {
             $this->error('Admin access required', 403);

@@ -79,11 +79,23 @@ export class PlayerPlaylist {
       this.sidebar.style.display = 'flex';
       this.sidebar.setAttribute('data-density', this.density);
     }
+    // Drives the two-column layout (see "Layout v3" in player-styles.css).
+    document.body.classList.add('has-playlist');
 
     this._injectToolbar();
     this._updateHeaderStats(videoFiles);
 
-    this.render(startIndex);
+    this.render(startIndex, { initial: true });
+  }
+
+  /**
+   * Hide the rail (single-video items, or navigating from a series to a
+   * single video via history) and drop the layout class so the video
+   * column spans the full width again.
+   */
+  hide() {
+    if (this.sidebar) this.sidebar.style.display = 'none';
+    document.body.classList.remove('has-playlist');
   }
 
   /**
@@ -296,7 +308,7 @@ export class PlayerPlaylist {
   /**
    * Render the playlist items, applying the current filter.
    */
-  render(activeIndex = 0) {
+  render(activeIndex = 0, { initial = false } = {}) {
     if (!this.itemsEl) return;
     this.activeIndex = activeIndex;
 
@@ -394,27 +406,70 @@ export class PlayerPlaylist {
       });
     });
 
-    // Scroll active into view (only if not filtering). We intentionally
-    // avoid Element.scrollIntoView() here — it walks every scrollable
-    // ancestor, and on mobile the playlist sits below the video and
-    // description, so the browser ends up scrolling the entire page off
-    // the player. Adjust the sidebar's own scrollTop instead.
+    // Keep the active episode in view (only when not filtering).
     if (!q) {
-      requestAnimationFrame(() => {
-        const activeItem = this.itemsEl.querySelector('.playlist-item.active');
-        if (!activeItem) return;
-        const container = this.itemsEl;
-        const itemRect = activeItem.getBoundingClientRect();
-        const containerRect = container.getBoundingClientRect();
-        const above = itemRect.top - containerRect.top;
-        const below = itemRect.bottom - containerRect.bottom;
-        if (above < 0) {
-          container.scrollTop += above;
-        } else if (below > 0) {
-          container.scrollTop += below;
-        }
-      });
+      requestAnimationFrame(() => this._revealActive(initial));
     }
+  }
+
+  /**
+   * Bring the active item into view without Element.scrollIntoView(),
+   * which walks every scrollable ancestor and would drag the whole page.
+   *
+   *   Desktop: the rail is viewport-bounded and the list scrolls inside
+   *            it, so nudge the list's own scrollTop.
+   *   Mobile:  the list flows in the page under a sticky video, so the
+   *            list itself never scrolls. There we scroll the window —
+   *            but only when the playlist is already on screen (the user
+   *            is browsing it); never on first paint, and never while
+   *            they're reading the description/comments elsewhere.
+   */
+  _revealActive(initial) {
+    const activeItem = this.itemsEl && this.itemsEl.querySelector('.playlist-item.active');
+    if (!activeItem) return;
+    const container = this.itemsEl;
+    const itemRect = activeItem.getBoundingClientRect();
+
+    const listScrolls = container.scrollHeight > container.clientHeight + 1;
+    if (listScrolls) {
+      const containerRect = container.getBoundingClientRect();
+      const above = itemRect.top - containerRect.top;
+      const below = itemRect.bottom - containerRect.bottom;
+      if (above < 0) container.scrollTop += above;
+      else if (below > 0) container.scrollTop += below;
+      return;
+    }
+
+    if (initial) return;
+    const vh = window.innerHeight || document.documentElement.clientHeight;
+    const listRect = container.getBoundingClientRect();
+    const listOnScreen = listRect.bottom > 0 && listRect.top < vh;
+    if (!listOnScreen) return;
+
+    // Space taken by the sticky header + video + playlist header on top.
+    const stickyTop = this._stickyOffset();
+    if (itemRect.top < stickyTop) {
+      window.scrollBy({ top: itemRect.top - stickyTop, behavior: 'smooth' });
+    } else if (itemRect.bottom > vh) {
+      window.scrollBy({ top: itemRect.bottom - vh + 8, behavior: 'smooth' });
+    }
+  }
+
+  _stickyOffset() {
+    let offset = 0;
+    const cinema = document.getElementById('playerCinema');
+    if (cinema && getComputedStyle(cinema).position === 'sticky') {
+      offset = cinema.getBoundingClientRect().bottom;
+    }
+    const header = this.sidebar && this.sidebar.querySelector('.player-sidebar-header');
+    if (header && getComputedStyle(header).position === 'sticky') {
+      offset += header.getBoundingClientRect().height;
+    }
+    const toolbar = this.sidebar && this.sidebar.querySelector('.player-sidebar-toolbar');
+    if (toolbar && getComputedStyle(toolbar).position === 'sticky') {
+      offset += toolbar.getBoundingClientRect().height;
+    }
+    return Math.max(0, offset);
   }
 
   /**

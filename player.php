@@ -193,9 +193,19 @@ function darkenColor($hex, $percent = 20) {
     return sprintf('#%02x%02x%02x', $r, $g, $b);
 }
 
+// The colours land inside a <style> block where htmlspecialchars() can't
+// neutralise CSS syntax; only a hex colour is ever allowed through.
+if (function_exists('afc_css_color')) {
+    $site_settings['brandColor'] = afc_css_color((string)$site_settings['brandColor'], '#ff0000');
+    $site_settings['accentColor'] = afc_css_color((string)$site_settings['accentColor'], '#065fd4');
+} else {
+    foreach (['brandColor' => '#ff0000', 'accentColor' => '#065fd4'] as $k => $fallback) {
+        if (!preg_match('/^#[0-9a-f]{3,8}$/i', (string)$site_settings[$k])) $site_settings[$k] = $fallback;
+    }
+}
 $brandColorDark = darkenColor($site_settings['brandColor']);
 $accentColorDark = darkenColor($site_settings['accentColor']);
-$initialTheme = $site_settings['defaultTheme'] === 'system' ? 'dark' : $site_settings['defaultTheme'];
+$initialTheme = in_array($site_settings['defaultTheme'], ['dark', 'light'], true) ? $site_settings['defaultTheme'] : 'dark';
 ?>
 <!DOCTYPE html>
 <html lang="en" data-theme="<?= escapeAttr($initialTheme) ?>">
@@ -336,8 +346,16 @@ $initialTheme = $site_settings['defaultTheme'] === 'system' ? 'dark' : $site_set
     </div>
   </header>
 
-  <!-- Cinema Area -->
+  <!-- Layout:
+         .player-layout            one column, or [video column | playlist rail]
+           .player-primary         cinema + everything below it
+             .player-cinema
+             .player-content
+           .player-sidebar         playlist rail (shown only for multi-part items;
+                                   JS adds body.has-playlist) -->
   <main class="player-main">
+   <div class="player-layout" id="playerLayout">
+   <div class="player-primary">
     <div class="player-cinema" id="playerCinema">
       <div id="videoWrapper" class="player-video-wrapper">
         <div id="playerLoader" class="player-loader" role="status" aria-busy="true">
@@ -490,6 +508,8 @@ $initialTheme = $site_settings['defaultTheme'] === 'system' ? 'dark' : $site_set
           <div id="downloadLinks" class="player-download-links"></div>
         </section>
       </div>
+    </div><!-- /.player-content -->
+   </div><!-- /.player-primary -->
 
       <!-- Sidebar: Playlist -->
       <aside id="playlistSidebar" class="player-sidebar" style="display: none;" data-density="comfortable">
@@ -509,7 +529,7 @@ $initialTheme = $site_settings['defaultTheme'] === 'system' ? 'dark' : $site_set
         </div>
         <div id="playlistItems" class="player-sidebar-items"></div>
       </aside>
-    </div>
+   </div><!-- /.player-layout -->
   </main>
 
   <!-- Keyboard Shortcuts Help (triggered by `?`) -->

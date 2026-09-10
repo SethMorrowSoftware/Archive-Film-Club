@@ -32,6 +32,12 @@ $admin = $api->requireAdmin();
 if (($admin['role'] ?? '') !== 'admin') {
     $api->error('This area manages the database and is restricted to full administrators.', 403);
 }
+// The break-glass (ADMIN_PASSWORD) session exists precisely because the
+// database is unreachable — there is nothing here for it to maintain, and a
+// synthetic id-0 admin must never drive backup/restore/reset. Live DB only.
+if (!empty($admin['break_glass'])) {
+    $api->error('Database maintenance requires a real administrator account on a live database.', 403);
+}
 
 /**
  * One audit line per maintenance action. There is no dedicated audit table

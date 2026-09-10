@@ -60,8 +60,44 @@ if (function_exists('csrf_meta_tag')) {
         + '</div>';
 
       var ack = overlay.querySelector('[data-disclaimer-ack]');
+
+      // Modal contract: lock page scroll and keep Tab / Shift+Tab inside
+      // the dialog until it's acknowledged. Deliberately NO Escape — this
+      // one is meant to be read and dismissed explicitly. Self-contained
+      // (classic script, no module import) because this partial runs on
+      // every page, including ones that never load the app bundle.
+      var prevOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+
+      function focusables() {
+        var nodes = overlay.querySelectorAll('a[href], button, [tabindex]:not([tabindex="-1"])');
+        var out = [];
+        for (var i = 0; i < nodes.length; i++) {
+          if (!nodes[i].disabled && nodes[i].offsetParent !== null) out.push(nodes[i]);
+        }
+        return out;
+      }
+      function onKey(e) {
+        if (e.key !== 'Tab') return;
+        var items = focusables();
+        if (!items.length) { e.preventDefault(); return; }
+        var first = items[0];
+        var last = items[items.length - 1];
+        var active = document.activeElement;
+        if (e.shiftKey && (active === first || !overlay.contains(active))) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && (active === last || !overlay.contains(active))) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+      document.addEventListener('keydown', onKey);
+
       ack.addEventListener('click', function () {
         try { localStorage.setItem(STORAGE_KEY, '1'); } catch (e) {}
+        document.removeEventListener('keydown', onKey);
+        document.body.style.overflow = prevOverflow;
         overlay.remove();
       });
 

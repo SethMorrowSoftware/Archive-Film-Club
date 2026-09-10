@@ -482,7 +482,12 @@ class UserAuthService {
         ]);
     }
 
-    private function issueRememberToken(int $userId): void {
+    /**
+     * Mint a remember-me token for $userId and set the cookie. Public so
+     * UserContext can rotate the token on every successful remember-me
+     * login through this one code path (same TTL, same cookie params).
+     */
+    public function issueRememberToken(int $userId): void {
         $rawToken = bin2hex(random_bytes(32));
         $this->storeToken($userId, $rawToken, 'remember',
             '+' . self::REMEMBER_TTL_DAYS . ' days');

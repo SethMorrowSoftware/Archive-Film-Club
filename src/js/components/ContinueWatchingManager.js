@@ -97,8 +97,10 @@ export class ContinueWatchingManager {
 
     this.grid.querySelectorAll('.recommended-card').forEach(card => {
       card.addEventListener('click', (e) => {
-        // Don't navigate when the user clicked the per-card remove button.
+        // Don't navigate when the user clicked the per-card remove button,
+        // and let the title link handle its own clicks (middle-click etc).
         if (e.target.closest('[data-cw-remove]')) return;
+        if (e.target.closest('a')) return;
         const id = card.dataset.identifier;
         if (id) this.app.navigateToPlayer(id);
       });
@@ -121,7 +123,10 @@ export class ContinueWatchingManager {
     const pct = Math.max(2, Math.min(98, entry.percentage || 0));
     const remaining = Math.max(0, (entry.duration || 0) - (entry.currentTime || 0));
     const remainingLabel = this._formatRemaining(remaining);
+    const playerUrl = `player.php?video=${encodeURIComponent(entry.id)}`;
 
+    // onerror only hides the <img> and flags the wrapper: replacing the
+    // wrapper's innerHTML used to wipe the progress bar and remove button.
     return `
       <article class="recommended-card continue-watching-card" data-identifier="${escapeHtml(entry.id)}">
         <div class="recommended-card-thumb">
@@ -129,7 +134,7 @@ export class ContinueWatchingManager {
                alt="${escapeHtml(title)}"
                loading="lazy"
                decoding="async"
-               onerror="this.style.display='none'; this.parentNode.innerHTML='<div class=thumb-placeholder>🎬</div>'"/>
+               onerror="this.style.display='none';this.parentNode.classList.add('thumb-missing')"/>
           ${remainingLabel ? `<span class="runtime-badge">${escapeHtml(remainingLabel)} left</span>` : ''}
           <div class="recommended-card-overlay">
             <span class="play-btn">${ICONS.play}</span>
@@ -148,7 +153,7 @@ export class ContinueWatchingManager {
           </button>
         </div>
         <div class="recommended-card-content">
-          <h3 class="recommended-card-title">${escapeHtml(title)}</h3>
+          <h3 class="recommended-card-title"><a class="card-link" href="${playerUrl}">${escapeHtml(title)}</a></h3>
           ${creator ? `<p class="recommended-card-creator">${escapeHtml(creator)}</p>` : ''}
         </div>
       </article>
@@ -167,9 +172,26 @@ export class ContinueWatchingManager {
   }
 
   remove(id) {
+    // On touch devices the × button is always visible (no hover to reveal
+    // it) and sits right on the thumbnail, so a stray tap while scrolling
+    // would silently drop the entry. Ask first there; on pointer devices
+    // the hover-reveal is already a deliberate two-step.
+    if (this._isTouch()) {
+      const entry = this.entries.find(e => e.id === id);
+      const label = (entry && entry.title) ? `"${entry.title}"` : 'this video';
+      if (!window.confirm(`Remove ${label} from Continue Watching?`)) return;
+    }
     this.tracker.clearProgress(id);
     this.entries = this.entries.filter(e => e.id !== id);
     this.render();
+  }
+
+  _isTouch() {
+    try {
+      return window.matchMedia('(hover: none)').matches;
+    } catch (_) {
+      return false;
+    }
   }
 
   clearAll() {

@@ -27,6 +27,15 @@ try {
 }
 $initialTheme = ($site_settings['defaultTheme'] ?? 'dark') === 'system' ? 'dark' : $site_settings['defaultTheme'];
 
+// Brand colours go inside a <style> block where HTML escaping is no
+// protection; validate as hex (guarded in case bootstrap's helper is absent).
+$brandColor = function_exists('afc_css_color')
+    ? afc_css_color((string)($site_settings['brandColor'] ?? ''), '#ff0000')
+    : (string)($site_settings['brandColor'] ?? '#ff0000');
+$accentColor = function_exists('afc_css_color')
+    ? afc_css_color((string)($site_settings['accentColor'] ?? ''), '#065fd4')
+    : (string)($site_settings['accentColor'] ?? '#065fd4');
+
 $missing = $_SERVER['REDIRECT_URL'] ?? '';
 ?>
 <!DOCTYPE html>
@@ -36,12 +45,12 @@ $missing = $_SERVER['REDIRECT_URL'] ?? '';
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="robots" content="noindex" />
   <title>Not found · <?= htmlspecialchars($site_settings['siteName'], ENT_QUOTES) ?></title>
-  <link rel="stylesheet" href="styles.css">
-  <link rel="stylesheet" href="auth-styles.css">
+  <link rel="stylesheet" href="<?= htmlspecialchars(asset_url('styles.css'), ENT_QUOTES) ?>">
+  <link rel="stylesheet" href="<?= htmlspecialchars(asset_url('auth-styles.css'), ENT_QUOTES) ?>">
   <style>
     :root {
-      --brand-color: <?= htmlspecialchars($site_settings['brandColor'], ENT_QUOTES) ?>;
-      --accent-color: <?= htmlspecialchars($site_settings['accentColor'], ENT_QUOTES) ?>;
+      --brand-color: <?= htmlspecialchars($brandColor, ENT_QUOTES) ?>;
+      --accent-color: <?= htmlspecialchars($accentColor, ENT_QUOTES) ?>;
     }
     .err-wrap {
       min-height: 70vh;

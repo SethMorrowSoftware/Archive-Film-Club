@@ -21,12 +21,27 @@ if (file_exists($envFile)) {
             $key = trim($key);
             $value = trim($value);
 
-            // Remove quotes if present
-            $value = trim($value, '"\'');
+            // Quoted values. install.php writes any value containing
+            // whitespace, '#' or a quote as a double-quoted string with `\`
+            // and `"` escaped; undo exactly those two escapes. Single-quoted
+            // values are literal. (Same rules as bootstrap.php's loader —
+            // keep the two in sync.)
+            $len = strlen($value);
+            if ($len >= 2 && $value[0] === '"' && $value[$len - 1] === '"') {
+                $value = preg_replace('/\\\\([\\\\"])/', '$1', substr($value, 1, -1));
+            } elseif ($len >= 2 && $value[0] === "'" && $value[$len - 1] === "'") {
+                $value = substr($value, 1, -1);
+            }
 
-            // Set as environment variable
-            putenv("$key=$value");
-            $_ENV[$key] = $value;
+            // Set as environment variable — but never clobber a value the
+            // real environment (Apache SetEnv, the cron shell, a container)
+            // already provides. bootstrap.php applies the same rule; before
+            // this guard the two loaders disagreed and a .env value could
+            // silently override a deliberate server-level setting.
+            if ($key !== '' && getenv($key) === false) {
+                putenv("$key=$value");
+                $_ENV[$key] = $value;
+            }
         }
     }
 }

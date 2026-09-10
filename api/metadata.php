@@ -19,6 +19,14 @@ try {
     $archiveService = new ArchiveOrgService();
     $result = $archiveService->getMetadata($archiveId);
 
+    // A cache HIT hands back the raw video_metadata_cache row, a MISS the
+    // normalized archive.org shape. Project the hit onto the miss shape so
+    // the client always sees identifier/thumbnail/licenseurl and never the
+    // internal columns (is_stale, refresh_count, raw_metadata, ...).
+    if (is_array($result['data'] ?? null)) {
+        $result['data'] = CacheManager::normalizeMetadataRow($result['data']);
+    }
+
     // public/cacheable — metadata is not user-bound and the server caches
     // it permanently against archive.org. The headers below govern how
     // often the BROWSER comes back to the server; the server doesn't

@@ -33,10 +33,12 @@ CREATE TABLE IF NOT EXISTS video_comments (
     -- SET NULL (not CASCADE): deleting a user must NOT delete their comments,
     -- because the parent_id CASCADE below would then also wipe OTHER users'
     -- replies under those threads. A deleted account's comments are kept and
-    -- rendered as "[deleted]". The FK is named so migration 007 can swap it
-    -- deterministically on existing installs.
+    -- rendered as "[deleted]". Both FKs are named so migration 007 can find
+    -- and repair them by name instead of guessing MySQL's auto-generated
+    -- `video_comments_ibfk_N` (which differs between fresh and upgraded
+    -- installs, and between MySQL and MariaDB).
     CONSTRAINT fk_video_comments_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
-    FOREIGN KEY (parent_id) REFERENCES video_comments(id) ON DELETE CASCADE
+    CONSTRAINT fk_video_comments_parent FOREIGN KEY (parent_id) REFERENCES video_comments(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS comment_likes (

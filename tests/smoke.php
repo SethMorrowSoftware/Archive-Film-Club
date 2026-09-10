@@ -41,10 +41,28 @@ try {
 $helpers = [
     'env', 'base_path', 'is_https', 'safe_host', 'safe_base_url',
     'app_cookie_path', 'csrf_token', 'csrf_verify', 'csrf_meta_tag',
+    'afc_css_color',
 ];
 foreach ($helpers as $fn) {
     if (!function_exists($fn)) {
         $failures[] = "bootstrap helper missing: {$fn}()";
+    }
+}
+
+// afc_css_color() guards the inline <style> color interpolation on every
+// page: only a hex color may pass, everything else collapses to the fallback.
+if (function_exists('afc_css_color')) {
+    $colorCases = [
+        ['#ff0000', '#ff0000'], ['#FFF', '#FFF'], ['#abcd', '#abcd'], ['#11223344', '#11223344'],
+        ['red', '#000'], ['', '#000'], ['#ff0000; background:url(x)', '#000'],
+        ['#ff00', '#ff00'], ['#ggg', '#000'], ['#123456789', '#000'],
+    ];
+    foreach ($colorCases as $case) {
+        list($in, $want) = $case;
+        $got = afc_css_color($in, '#000');
+        if ($got !== $want) {
+            $failures[] = "afc_css_color('{$in}'): expected '{$want}', got '{$got}'";
+        }
     }
 }
 
@@ -136,6 +154,66 @@ if (class_exists('MaintenanceService') && method_exists('MaintenanceService', 's
     }
 } else {
     $failures[] = 'MaintenanceService::splitSqlStatements not found (restore splitter missing)';
+}
+
+// ---------------------------------------------------------------------------
+// 5) Every migration file must split cleanly. Both migration runners
+//    (install.php and the admin "refresh schema" action) feed db/migrations
+//    through splitSqlStatements, so a comment form the splitter doesn't
+//    understand, or a stray `;`, would surface as a 1064 syntax error on a
+//    fresh install. Assert: at least one statement per file, no empty
+//    statement, every statement starts with a SQL keyword (i.e. no comment
+//    prose leaked into a statement), and 007 — the dynamic-SQL migration —
+//    splits into exactly the statement count its structure implies.
+// ---------------------------------------------------------------------------
+if (class_exists('MaintenanceService') && method_exists('MaintenanceService', 'splitSqlStatements')) {
+    $migrationFiles = glob($root . '/db/migrations/*.sql') ?: [];
+    if (!$migrationFiles) {
+        $failures[] = 'no migration files found under db/migrations';
+    }
+    $leadKeyword = '/^(ALTER|CREATE|INSERT|UPDATE|DELETE|DROP|SET|PREPARE|EXECUTE|DEALLOCATE|SELECT)\b/i';
+    foreach ($migrationFiles as $mf) {
+        $name = basename($mf);
+        $stmts = MaintenanceService::splitSqlStatements((string)file_get_contents($mf));
+        if (count($stmts) === 0) {
+            $failures[] = "migration {$name}: splitter produced no statements";
+            continue;
+        }
+        foreach ($stmts as $i => $s) {
+            if (trim($s) === '') {
+                $failures[] = "migration {$name}: statement #{$i} is empty";
+            } elseif (!preg_match($leadKeyword, ltrim($s))) {
+                $failures[] = "migration {$name}: statement #{$i} does not start with a SQL keyword: "
+                            . substr(ltrim($s), 0, 40);
+            }
+        }
+        if (strpos($name, '007_') === 0) {
+            // 1 MODIFY + 3 blocks of (SET @fk, SET @sql, PREPARE, EXECUTE, DEALLOCATE)
+            $want = 1 + 3 * 5;
+            if (count($stmts) !== $want) {
+                $failures[] = "migration {$name}: expected {$want} statements, got " . count($stmts);
+            }
+            // The CONCAT() literal carries backticks inside single quotes; make
+            // sure the splitter kept that whole SET intact rather than opening
+            // a backtick-identifier state and swallowing the following `;`.
+            $joined = implode("\n", $stmts);
+            if (strpos($joined, "DROP FOREIGN KEY `', @fk, '`'") === false) {
+                $failures[] = "migration {$name}: dynamic DROP FOREIGN KEY literal was garbled by the splitter";
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 6) Database::exec() must exist — migration 007's PREPARE/EXECUTE cannot go
+//    through query()'s server-side prepared statements, so both runners
+//    depend on it. Static check only (no connection is made).
+// ---------------------------------------------------------------------------
+if (class_exists('Database') && !method_exists('Database', 'exec')) {
+    $failures[] = 'Database::exec() missing — migration runners need it for PREPARE/EXECUTE statements';
+}
+if (class_exists('MaintenanceService') && !method_exists('MaintenanceService', 'isIgnorableMigrationError')) {
+    $failures[] = 'MaintenanceService::isIgnorableMigrationError() missing — install.php runner depends on it';
 }
 
 // ---------------------------------------------------------------------------

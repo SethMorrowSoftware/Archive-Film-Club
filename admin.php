@@ -34,11 +34,17 @@ require_once __DIR__ . '/admin/controllers/AdminBootstrap.php';
     <?php else: ?>
         <?php include __DIR__ . '/admin/views/layout.php'; ?>
 
+        <?php
+        // JSON_HEX_* so a stored value containing `</script>` (a staff-pick
+        // title, the tagline) can't break out of this block — same flags
+        // index.php uses for its siteSettingsConfig embed.
+        $adminJsonFlags = JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT;
+        ?>
         <script>
             window.ADMIN_BOOTSTRAP = {
-                recommendations: <?= json_encode($current_recommendations) ?>,
-                siteSettings: <?= json_encode($site_settings) ?>,
-                featuredSections: <?= json_encode($featured_sections) ?>
+                recommendations: <?= json_encode($current_recommendations, $adminJsonFlags) ?>,
+                siteSettings: <?= json_encode($site_settings, $adminJsonFlags) ?>,
+                featuredSections: <?= json_encode($featured_sections, $adminJsonFlags) ?>
             };
         </script>
         <script src="admin/assets/admin.js"></script>

@@ -88,6 +88,23 @@ class Database {
     }
 
     /**
+     * Execute a raw statement WITHOUT the prepared-statement protocol and
+     * return the affected-row count.
+     *
+     * This connection runs with ATTR_EMULATE_PREPARES=false, so query() sends
+     * every statement through MySQL's server-side PREPARE. A handful of SQL
+     * commands are refused there ("This command is not supported in the
+     * prepared statement protocol") — most importantly PREPARE / EXECUTE /
+     * DEALLOCATE PREPARE, which the migration files use for dynamic DDL.
+     * Migration runners must therefore go through exec(). Never pass
+     * user-supplied strings here: there is no parameter binding.
+     */
+    public function exec(string $sql): int {
+        $this->queryCount++;
+        return (int)$this->pdo->exec($sql);
+    }
+
+    /**
      * Fetch a single row
      */
     public function fetchOne(string $sql, array $params = []): ?array {

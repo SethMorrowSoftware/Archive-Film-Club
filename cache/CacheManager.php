@@ -249,8 +249,13 @@ class CacheManager {
             );
 
             if ($staleResult) {
-                // Mark as stale for background refresh
-                $this->markMetadataStale($archiveId);
+                // Mark as stale for background refresh — once. Every hit on
+                // a stale row used to re-run the UPDATE plus the cache_queue
+                // upsert; when the row is already flagged there is nothing
+                // to change, so skip the two writes.
+                if (empty($staleResult['is_stale'])) {
+                    $this->markMetadataStale($archiveId);
+                }
 
                 // Parse JSON fields
                 if (!empty($staleResult['files_json'])) {
@@ -271,6 +276,59 @@ class CacheManager {
         }
 
         return null;
+    }
+
+    /**
+     * Project a video_metadata_cache row (as returned by getMetadataCache())
+     * onto the public metadata shape ArchiveOrgService::normalizeMetadata()
+     * produces on a cache MISS, so /api/metadata.php and
+     * /api/metadata-batch.php answer with one shape regardless of hit/miss.
+     *
+     * A raw row differs from the miss shape in three ways this fixes:
+     *   - it has `archive_id` / `license_url` / a comma-joined `subject`
+     *     string instead of `identifier` / `licenseurl` / a `subject` array,
+     *   - it lacks `identifier` and `thumbnail`,
+     *   - it carries internal columns (id, expires_at, is_permanent,
+     *     is_stale, last_refreshed, refresh_count, thumbnail_cached,
+     *     raw_metadata, _is_stale) that the client has no business seeing.
+     *
+     * Idempotent: an already-normalized array passes through unchanged, so
+     * callers can apply it uniformly. getMetadataCache() itself is left
+     * alone — index.php and player.php read its raw columns directly.
+     */
+    public static function normalizeMetadataRow(array $row): array {
+        $archiveId = (string)($row['identifier'] ?? $row['archive_id'] ?? '');
+
+        $subject = $row['subject'] ?? [];
+        if (is_string($subject)) {
+            // Stored as implode(', ', ...) by setMetadataCache().
+            $subject = $subject === ''
+                ? []
+                : array_values(array_filter(array_map('trim', explode(',', $subject)), 'strlen'));
+        } elseif (!is_array($subject)) {
+            $subject = [];
+        }
+
+        $title = $row['title'] ?? null;
+        if ($title === null || $title === '') {
+            $title = $archiveId;
+        }
+
+        return [
+            'identifier' => $archiveId,
+            'title' => $title,
+            'description' => $row['description'] ?? null,
+            'creator' => $row['creator'] ?? null,
+            'date' => $row['date'] ?? null,
+            'runtime' => $row['runtime'] ?? null,
+            'mediatype' => $row['mediatype'] ?? null,
+            'downloads' => (int)($row['downloads'] ?? 0),
+            'licenseurl' => $row['licenseurl'] ?? ($row['license_url'] ?? null),
+            'subject' => $subject,
+            'collection' => is_array($row['collection'] ?? null) ? $row['collection'] : [],
+            'files' => is_array($row['files'] ?? null) ? $row['files'] : [],
+            'thumbnail' => $row['thumbnail'] ?? "https://archive.org/services/img/{$archiveId}",
+        ];
     }
 
     /**

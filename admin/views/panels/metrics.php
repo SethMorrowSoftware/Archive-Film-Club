@@ -21,7 +21,9 @@
         </div>
         <div class="card-body">
             <div class="metrics-chart-wrap">
-                <svg id="metricsChart" class="metrics-chart" preserveAspectRatio="none" viewBox="0 0 600 220" aria-hidden="true"></svg>
+                <!-- admin-metrics.js sets the viewBox to the SVG's pixel size on
+                     every draw, so 1 unit = 1px and axis text is never stretched. -->
+                <svg id="metricsChart" class="metrics-chart" viewBox="0 0 600 220" aria-hidden="true"></svg>
                 <div class="metrics-chart-empty" id="metricsChartEmpty" style="display:none;">
                     No data for this range yet.
                 </div>

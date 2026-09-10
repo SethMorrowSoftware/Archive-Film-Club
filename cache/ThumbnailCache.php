@@ -95,6 +95,12 @@ class ThumbnailCache {
     private function downloadImage(string $url): ?string {
         $data = null;
 
+        // Upstream responses bigger than this are not thumbnails. The cap
+        // bounds both the buffered download and — more importantly — the GD
+        // decode in processAndSave(), which is the expensive step for an
+        // oversized or crafted image. Same guards as api/thumbnail.php.
+        $maxBytes = 10 * 1024 * 1024;
+
         // Try cURL first (more reliable on shared hosting)
         if (function_exists('curl_init')) {
             $ch = curl_init();
@@ -105,6 +111,7 @@ class ThumbnailCache {
                 CURLOPT_TIMEOUT => 15,
                 CURLOPT_USERAGENT => 'Mozilla/5.0 (compatible; ArchiveFilmClub/1.0)',
                 CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_MAXFILESIZE => $maxBytes, // honored when Content-Length is sent
             ]);
             $data = curl_exec($ch);
             $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -129,14 +136,22 @@ class ThumbnailCache {
                 ],
             ]);
 
-            $data = @file_get_contents($url, false, $context);
+            // maxlen reads one byte past the cap so the size check below can
+            // tell "exactly at the cap" from "truncated".
+            $data = @file_get_contents($url, false, $context, 0, $maxBytes + 1);
         }
 
         if ($data === null || $data === false || strlen($data) < 100) {
             return null;
         }
+        if (strlen($data) > $maxBytes) {
+            return null; // too large to be a thumbnail — don't hand it to GD
+        }
 
         // Verify it's an image
+        if (!class_exists('finfo')) {
+            return null; // fileinfo extension not available
+        }
         $finfo = new finfo(FILEINFO_MIME_TYPE);
         $mime = $finfo->buffer($data);
 

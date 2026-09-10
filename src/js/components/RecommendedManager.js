@@ -3,8 +3,12 @@
  * Manages the Staff Picks / Recommended videos section
  */
 
-import { escapeHtml, extractValue, formatRuntime, getThumbnailUrl } from '../utils/helpers.js';
+import { escapeHtml, extractValue, formatRuntime, getThumbnailUrl, mapWithConcurrency } from '../utils/helpers.js';
 import { ICONS } from '../utils/icons.js';
+
+// Cap on parallel archive.org metadata fallback fetches (see
+// FeaturedSectionsManager for the rationale).
+const FALLBACK_CONCURRENCY = 6;
 
 export class RecommendedManager {
   constructor(app) {
@@ -135,17 +139,19 @@ export class RecommendedManager {
     // Direct archive.org fallback for any IDs the batch endpoint didn't return
     const stillMissing = ids.filter(id => !metadataMap[id]);
     if (stillMissing.length > 0) {
-      const fallbacks = await Promise.all(stillMissing.map(async (id) => {
+      const fallbacks = await mapWithConcurrency(stillMissing, FALLBACK_CONCURRENCY, async (id) => {
         try {
-          const response = await fetch(`https://archive.org/metadata/${id}`);
+          const response = await fetch(`https://archive.org/metadata/${encodeURIComponent(id)}`);
           if (!response.ok) return [id, null];
           const data = await response.json();
           return [id, data?.metadata ? { ...data.metadata, identifier: id } : null];
         } catch {
           return [id, null];
         }
-      }));
-      for (const [id, meta] of fallbacks) {
+      });
+      for (const entry of fallbacks) {
+        if (!entry) continue;
+        const [id, meta] = entry;
         if (meta) metadataMap[id] = meta;
       }
     }
@@ -222,23 +228,27 @@ export class RecommendedManager {
     const creator = extractValue(video.creator) || 'Unknown';
     const thumbUrl = getThumbnailUrl(video.identifier);
     const runtime = formatRuntime(video.runtime);
+    const playerUrl = `player.php?video=${encodeURIComponent(video.identifier)}`;
 
+    // The title is a real link so the card is keyboard-operable and
+    // middle-click / "open in new tab" work. The card-level click handler
+    // ignores clicks that land on the link and lets the browser navigate.
     return `
-      <article class="recommended-card" data-identifier="${video.identifier}">
+      <article class="recommended-card" data-identifier="${escapeHtml(video.identifier)}">
         <div class="recommended-card-thumb">
           <img src="${thumbUrl}"
                alt="${escapeHtml(title)}"
                loading="eager"
                decoding="async"
                fetchpriority="high"
-               onerror="this.style.display='none'; this.parentNode.innerHTML='<div class=thumb-placeholder>🎬</div>'"/>
+               onerror="this.style.display='none';this.parentNode.classList.add('thumb-missing')"/>
           ${runtime ? `<span class="runtime-badge">${runtime}</span>` : ''}
           <div class="recommended-card-overlay">
             <span class="play-btn">${ICONS.play}</span>
           </div>
         </div>
         <div class="recommended-card-content">
-          <h3 class="recommended-card-title">${escapeHtml(title)}</h3>
+          <h3 class="recommended-card-title"><a class="card-link" href="${playerUrl}">${escapeHtml(title)}</a></h3>
           <p class="recommended-card-creator">${escapeHtml(creator)}</p>
           ${video.adminNote ? `<span class="recommended-card-note">${ICONS.star} ${escapeHtml(video.adminNote)}</span>` : ''}
         </div>
