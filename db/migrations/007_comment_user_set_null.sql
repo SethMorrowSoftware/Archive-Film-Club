@@ -19,15 +19,20 @@
 -- differs between a fresh install of the current 006 (where user_id is already
 -- named) and an upgraded one, so instead of guessing the name we look it up in
 -- information_schema and build the ALTER dynamically. Each step is a no-op
--- (`SELECT 1`) when there is nothing to do, so this file is safe to re-run and
+-- (`DO 0`) when there is nothing to do, so this file is safe to re-run and
 -- also REPAIRS installs that ran an earlier version of this migration, which
 -- could drop the parent_id cascade FK by mistake.
 --
 -- NOTE for the runner: PREPARE/EXECUTE cannot go through PDO's server-side
 -- prepared-statement protocol. Both migration runners (install.php and the
 -- admin "refresh schema" action) send statements with PDO::exec() for this
--- reason. `SET @x := (SELECT ...)` requires the subquery to return at most one
--- row — the LIMIT 1 guarantees that.
+-- reason — and PDO::exec() never reads a result set, so NO statement here may
+-- produce one. That is why the no-op is `DO 0` and not `SELECT 1`: a SELECT
+-- executed via EXECUTE left its rows pending on the connection and the next
+-- statement failed with "2014 Cannot execute queries while other unbuffered
+-- queries are active". `SET @x := (SELECT ...)` is fine (SET returns no rows)
+-- but requires the subquery to return at most one row — the LIMIT 1
+-- guarantees that.
 --
 -- Safe to run on an existing database. Re-runnable.
 -- =====================================================
@@ -44,7 +49,7 @@ SET @fk := (SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
               AND REFERENCED_TABLE_NAME = 'users'
               AND CONSTRAINT_NAME <> 'fk_video_comments_user'
             LIMIT 1);
-SET @sql := IF(@fk IS NULL, 'SELECT 1', CONCAT('ALTER TABLE video_comments DROP FOREIGN KEY `', @fk, '`'));
+SET @sql := IF(@fk IS NULL, 'DO 0', CONCAT('ALTER TABLE video_comments DROP FOREIGN KEY `', @fk, '`'));
 PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
@@ -57,7 +62,7 @@ SET @fk := (SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
               AND COLUMN_NAME = 'user_id'
               AND REFERENCED_TABLE_NAME = 'users'
             LIMIT 1);
-SET @sql := IF(@fk IS NOT NULL, 'SELECT 1', 'ALTER TABLE video_comments ADD CONSTRAINT fk_video_comments_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL');
+SET @sql := IF(@fk IS NOT NULL, 'DO 0', 'ALTER TABLE video_comments ADD CONSTRAINT fk_video_comments_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL');
 PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
@@ -71,7 +76,7 @@ SET @fk := (SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
               AND COLUMN_NAME = 'parent_id'
               AND REFERENCED_TABLE_NAME = 'video_comments'
             LIMIT 1);
-SET @sql := IF(@fk IS NOT NULL, 'SELECT 1', 'ALTER TABLE video_comments ADD CONSTRAINT fk_video_comments_parent FOREIGN KEY (parent_id) REFERENCES video_comments(id) ON DELETE CASCADE');
+SET @sql := IF(@fk IS NOT NULL, 'DO 0', 'ALTER TABLE video_comments ADD CONSTRAINT fk_video_comments_parent FOREIGN KEY (parent_id) REFERENCES video_comments(id) ON DELETE CASCADE');
 PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;

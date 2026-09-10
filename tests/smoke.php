@@ -186,6 +186,24 @@ if (class_exists('MaintenanceService') && method_exists('MaintenanceService', 's
                 $failures[] = "migration {$name}: statement #{$i} does not start with a SQL keyword: "
                             . substr(ltrim($s), 0, 40);
             }
+            // Both runners execute statements with PDO::exec(), which never
+            // reads a result set: a SELECT/SHOW leaves its rows pending and
+            // the NEXT statement dies with MySQL error 2014 ("Cannot execute
+            // queries while other unbuffered queries are active"). That
+            // includes dynamic SQL — a `SET @sql := IF(..., 'SELECT 1', ...)`
+            // no-op broke every fresh install once. Use `DO 0` instead.
+            if (preg_match('/^\s*(SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i', $s)) {
+                $failures[] = "migration {$name}: statement #{$i} returns a result set (PDO::exec would leave it pending): "
+                            . substr(ltrim($s), 0, 40);
+            }
+            if (preg_match('/^\s*SET\s+@/i', $s) && preg_match_all("/'((?:[^'\\\\]|\\\\.)*)'/", $s, $m)) {
+                foreach ($m[1] as $literal) {
+                    if (preg_match('/^\s*(SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i', $literal)) {
+                        $failures[] = "migration {$name}: statement #{$i} builds dynamic SQL that returns a result set: '"
+                                    . substr($literal, 0, 40) . "' — use DO 0 as the no-op";
+                    }
+                }
+            }
         }
         if (strpos($name, '007_') === 0) {
             // 1 MODIFY + 3 blocks of (SET @fk, SET @sql, PREPARE, EXECUTE, DEALLOCATE)
